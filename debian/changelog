@@ -1,25 +1,41 @@
-ocaml (4.11.1.1-1+dde) UNRELEASED; urgency=medium
+ocaml (4.13.1-4) unstable; urgency=medium
 
-  * update
+  * Avoid build path ending up in binaries (Closes: #1030785)
 
- -- Debian OCaml Maintainers <debian-ocaml-maint@lists.debian.org>  Tue, 26 Jul 2022 16:10:04 +0800
+ -- Stéphane Glondu <glondu@debian.org>  Sun, 12 Feb 2023 11:46:40 +0100
 
-ocaml (4.11.1.1-1+dde) unstable; urgency=medium
+ocaml (4.13.1-3) unstable; urgency=medium
 
-  * Add sunway support.
+  * Upload to unstable
+  * Adapt maintainer scripts to new binary package structure
+  * Do no longer provide /usr/include/caml symlink
 
- -- Miao Changwei <miaochangwei@uniontech.com>  Thu, 19 May 2022 13:54:42 +0800
+ -- Stéphane Glondu <glondu@debian.org>  Wed, 19 Jan 2022 11:14:42 +0100
+
+ocaml (4.13.1-2) experimental; urgency=medium
+
+  * Put transitional packages in section oldlibs
+  * Fix building of manpages on bytecode architectures
+  * Restore patch putting manpages in section 3o
+  * Enable fma emulation on m68k
+  * Ignore tests failure on m68k
+
+ -- Stéphane Glondu <glondu@debian.org>  Wed, 22 Dec 2021 08:17:13 +0100
+
+ocaml (4.13.1-1) experimental; urgency=medium
+
+  * New upstream release
+  * Make *-nox packages transitional
+
+ -- Stéphane Glondu <glondu@debian.org>  Tue, 21 Dec 2021 16:33:05 +0100
 
 ocaml (4.11.1-5) unstable; urgency=medium
-
-  * Add uniontech001_workaround_for_glibc_non-constant_SIGSTKSZ.patch
-  * Workaround for glibc non-const SIGSTKSZ and autoconf issues
 
   * Do not error on warnings in autoconf (Closes: #978875)
   * Bump Standards-Version to 4.6.0
   * Update debian/watch
 
- -- renyehui <renyehui@uniontech.com>  Fri, 15 Jul 2022 14:02:16 +0800
+ -- Stéphane Glondu <glondu@debian.org>  Thu, 25 Nov 2021 15:45:31 +0100
 
 ocaml (4.11.1-4) unstable; urgency=medium
 
@@ -2228,7 +2244,7 @@ ocaml (3.00-4) unstable; urgency=low
 
   * added debhelper to the Build-depends :((((
 
- -- Sven Luther <luther@debian.org>  Tue, 10 Jan 2001 18:25:32 +0100
+ -- Sven Luther <luther@debian.org>  Wed, 10 Jan 2001 18:25:32 +0100
 
 ocaml (3.00-3) unstable; urgency=low
 
@@ -2378,7 +2394,7 @@ ocaml (2.01-5) unstable; urgency=low
   * fixed the ocamlmktop bug, by removing the $PREFIX stuff from
     tools/Makefile. It is not needed there.
 
- -- Sven Luther <luther@debian.org>  Wed, 26 Feb 1999 07:40:35 +0100
+ -- Sven Luther <luther@debian.org>  Fri, 26 Feb 1999 07:40:35 +0100
 
 ocaml (2.01-4) unstable; urgency=low
 
@@ -2410,7 +2426,7 @@ ocaml (2.01-1) unstable; urgency=low
 
   * New upstream release.
 
- -- Sven Luther <luther@debian.org>  Tue, 11 Feb 1999 13:51:35 +0100
+ -- Sven Luther <luther@debian.org>  Thu, 11 Feb 1999 13:51:35 +0100
 
 ocaml (2.00-2) unstable; urgency=low
 
