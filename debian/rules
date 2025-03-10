@@ -54,6 +54,7 @@ export DEB_BUILD_MAINT_OPTIONS=hardening=+bindnow
 export CCLINKFLAGS=$(shell dpkg-buildflags --get LDFLAGS)
 
 CONFIGURE_OPTS := \
+  --enable-ocamltest \
   --host $(DEB_BUILD_GNU_TYPE)\
   -prefix $(DEB_TEST_BUILD_PREFIX)/usr \
   -libdir $(DEB_TEST_BUILD_PREFIX)$(OCAML_STDLIB_DIR) \
@@ -70,6 +71,8 @@ endif
 ifeq (m68k,$(DEB_BUILD_ARCH))
 CONFIGURE_OPTS += --enable-imprecise-c99-float-ops
 IGNORE_TESTS_FAILURE := || true
+else ifneq (,$(findstring hurd,$(DEB_BUILD_ARCH)))
+IGNORE_TESTS_FAILURE := || true
 else
 IGNORE_TESTS_FAILURE :=
 endif
@@ -84,12 +87,6 @@ export BUILD_PATH_PREFIX_MAP=.=$(CURDIR)
 .PHONY: build
 build:
 	dh $@
-
-# Generate ocaml-native-compilers' Architecture field.
-# Should never be called automatically.
-.PHONY: debian/control
-debian/control:
-	sed -e 's/@OCamlNativeArchs@/$(OCAML_NATIVE_ARCHS)/g' debian/control.in > $@
 
 pre-config-stamp: $(TARBALL_TARGET)
 # Backup upstream config.{sub,guess}, and use most up-to-date ones
@@ -146,7 +143,6 @@ build-stamp: config-stamp
 	fi
 ifeq ($(BUILDCACHE),)
 	$(MAKE) world
-	$(MAKE) bootstrap
 	$(MAKE) -C tools dumpobj
 ifneq (,$(OCAML_OPT_ARCH))
 	@echo "Building native compilers"
@@ -181,6 +177,10 @@ endif
 # Remaining stuff
 	-rm -Rf debian/$(SRCTARBALL) $(TESTDIR)
 
+execute_after_dh_clean:
+	rm -f install-stamp-*
+	rm -f debian/installed-files debian/*.install
+
 .PHONY: override_dh_auto_install-arch override_dh_auto_install-indep
 override_dh_auto_install-arch: install-stamp-arch
 override_dh_auto_install-indep: install-stamp-indep
@@ -197,14 +197,20 @@ install-stamp-arch: install-stamp
 	  fi \
 	done
 # Install the seq compatibility package (OCaml >= 4.07)
-	mkdir -p debian/ocaml-base$(OCAML_STDLIB_DIR)/seq
-	cp debian/META.seq debian/ocaml-base$(OCAML_STDLIB_DIR)/seq/META
+	mkdir -p debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/seq
+	cp debian/META.seq debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/seq/META
 # Install the uchar compatibility package (OCaml >= 4.03)
-	mkdir -p debian/ocaml-base$(OCAML_STDLIB_DIR)/uchar
-	cp debian/META.uchar debian/ocaml-base$(OCAML_STDLIB_DIR)/uchar/META
+	mkdir -p debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/uchar
+	cp debian/META.uchar debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/uchar/META
 # Install the stdlib-shims compatibility package (OCaml >= 4.07)
-	mkdir -p debian/ocaml-base$(OCAML_STDLIB_DIR)/stdlib-shims
-	cp debian/META.stdlib-shims debian/ocaml-base$(OCAML_STDLIB_DIR)/stdlib-shims/META
+	mkdir -p debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/stdlib-shims
+	cp debian/META.stdlib-shims debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/stdlib-shims/META
+# Install the bigarray compatibility package (OCaml >= 5.2)
+	mkdir -p debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/bigarray
+	cp debian/META.bigarray debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/bigarray/META
+# Install the bytes compatibility package (OCaml >= 5.2)
+	mkdir -p debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/bytes
+	cp debian/META.bytes debian/libstdlib-ocaml-dev$(OCAML_STDLIB_DIR)/bytes/META
 # Remaining stuff
 	touch $@
 
@@ -213,7 +219,7 @@ install-stamp:
 	$(MAKE) install DESTDIR=$(CURDIR)/debian/tmp
 ifeq (,$(DEB_TEST_BUILD_PREFIX))
 # Remove Debian-specific file
-	rm -f $(INSTDIR)/lib/ocaml/ld.conf
+	rm -f debian/tmp$(OCAML_STDLIB_DIR)/ld.conf
 # Remove uninstalled files
 	rm -f \
 	  $(INSTDIR)/share/man/man1/ocamlopt.opt.1 \
@@ -226,16 +232,20 @@ ifeq ($(OCAML_HAVE_OCAMLOPT),no)
 	  $(INSTDIR)/bin/ocamloptp.* \
 	  $(INSTDIR)/bin/ocamloptp
 endif
+# Remove irrelevant files
+	rm -f \
+	  $(INSTDIR)/share/doc/ocaml/README.win32.adoc \
+	  $(INSTDIR)/share/doc/ocaml/LICENSE
 # Dispatch files with dh_install
 	find debian/tmp \( -type f -or -type l \) -printf '%P\n' > debian/installed-files
-	boot/ocamlrun ./ocaml -nostdlib -I debian/tmp/usr/lib/ocaml debian/dispatch.ml
+	boot/ocamlrun ./ocaml -nostdlib -I debian/tmp$(OCAML_STDLIB_DIR) debian/dispatch.ml
 	dh_install
 endif
 	touch $@
 
 .PHONY: override_dh_gencontrol
 override_dh_gencontrol:
-	set -e; for u in ocaml-source ocaml-interp ocaml-compiler-libs; do \
+	set -e; for u in ocaml-source ocaml-interp ocaml-base ocaml; do \
 	  echo 'F:OCamlABI=$(OCAML_ABI)' >> debian/$$u.substvars; \
 	done
 ifeq (,$(OCAML_OPT_ARCH))
@@ -243,12 +253,8 @@ ifeq (,$(OCAML_OPT_ARCH))
 else
 	echo 'F:NativeProvides=ocaml-native-compilers (= $${binary:Version})' >> debian/ocaml.substvars
 endif
-# Create .md5sums files and compute dependencies. Use $(OCAML_ABI)
-# because we know that OCaml ABI represents best dependencies for
-# OCaml package.
-	dh_ocaml -Xcompiler-libs \
-	 --runtime-map ocaml:ocaml-base \
-	 --checksum $(OCAML_ABI)
+# Create .md5sums files and compute dependencies.
+	dh_ocaml
 	dh_gencontrol
 # Check that OCAML_ABI is correct
 	if [ "$(OCAML_ABI)" != "$(shell boot/ocamlrun ./ocamlc -version | { read a && echo $${a%%_*}; })" ]; then \
@@ -277,22 +283,8 @@ ifeq (,$(findstring nocheck,$(DEB_BUILD_OPTIONS)))
 ifneq (,$(filter $(DEB_BUILD_ARCH),$(SLOW_ARCHITECTURES)))
 	rm -f testsuite/tests/misc-unsafe/almabench.ml
 endif
-ifneq (,$(findstring hurd,$(DEB_BUILD_ARCH)))
-	rm -f testsuite/tests/lib-threads/beat.ml
-	rm -f testsuite/tests/lib-systhreads/threadsigmask.ml
-	# Takes forever
-	rm -f testsuite/tests/lib-systhreads/testyield.ml
-	# Fail
-	rm -f testsuite/tests/lib-unix/unix-socket/recvfrom_unix.ml
-	rm -f testsuite/tests/tool-debugger/no_debug_event/noev.ml
-	rm -f testsuite/tests/tool-debugger/printer/debuggee.ml
-	rm -f testsuite/tests/misc/weaklifetime.ml
-	rm -f testsuite/tests/tool-debugger/basic/debuggee.ml
-	rm -f testsuite/tests/tool-debugger/dynlink/host.ml
-endif
 ifeq (,$(DEB_TEST_BUILD_PREFIX))
-	make -C ocamltest
-	make -C testsuite all $(IGNORE_TESTS_FAILURE)
+	OCAML_TEST_SIZE=1 make tests $(IGNORE_TESTS_FAILURE)
 endif
 endif
 
@@ -303,6 +295,3 @@ override_dh_installdocs:
 
 override_dh_autoreconf:
 	./tools/autogen
-
-# FIXME: figure out why dh_dwz fails
-override_dh_dwz:

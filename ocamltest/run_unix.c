@@ -15,6 +15,8 @@
 
 /* Run programs with rediretions and timeouts under Unix */
 
+#define CAML_INTERNALS
+
 #include <stdio.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -29,6 +31,7 @@
 
 #include "run.h"
 #include "run_common.h"
+#include <caml/domain.h>
 
 #define COREFILENAME "core"
 
@@ -115,11 +118,11 @@ static int paths_same_file(
   char realpath1[PATH_MAX], realpath2[PATH_MAX];
   if (realpath(path1, realpath1) == NULL)
     realpath_error(path1);
-    if (realpath(path2, realpath2) == NULL)
-    {
-      if (errno == ENOENT) return 0;
-      else realpath_error(path2);
-    }
+  if (realpath(path2, realpath2) == NULL)
+  {
+    if (errno == ENOENT) return 0;
+    else realpath_error(path2);
+  }
 #endif /* __GLIBC__ */
   if (strcmp(realpath1, realpath2) == 0)
     same_file = 1;
@@ -132,8 +135,7 @@ static int paths_same_file(
 
 static void update_environment(array local_env)
 {
-  array envp;
-  for (envp = local_env; *envp != NULL; envp++) {
+  for (array envp = local_env; *envp != NULL; envp++) {
     char *pos_eq = strchr(*envp, '=');
     if (pos_eq != NULL) {
       char *name, *value;
@@ -149,6 +151,8 @@ static void update_environment(array local_env)
       setenv(name, value, 1); /* 1 means overwrite */
       free(name);
       free(value);
+    } else {
+      unsetenv(*envp);
     }
   }
 }
@@ -327,7 +331,10 @@ static int run_command_parent(const command_settings *settings, pid_t child_pid)
     } else { /* Got a pid */
       code = handle_process_termination(
         settings, pid, status, settings->program);
-      if (pid == child_pid) child_code = code;
+      if (pid == child_pid) {
+        child_code = code;
+        waiting = 0;
+      }
     }
   }
 
@@ -344,6 +351,7 @@ int run_command(const command_settings *settings)
       myperror("fork");
       return -1;
     case 0: /* child process */
+      caml_atfork_hook();
       exit( run_command_child(settings) );
     default:
       return run_command_parent(settings, child_pid);

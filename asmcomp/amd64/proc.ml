@@ -76,8 +76,6 @@ let win64 = Arch.win64
      stub saves them into the GC regs block).
 *)
 
-let max_arguments_for_tailcalls = 10
-
 let int_reg_name =
   match Config.ccomp_type with
   | "msvc" ->
@@ -151,18 +149,17 @@ let destroyed_by_plt_stub_set = Reg.set_of_array destroyed_by_plt_stub
 let stack_slot slot ty =
   Reg.at_location ty (Stack slot)
 
-(* Instruction selection *)
-
-let word_addressed = false
-
 (* Calling conventions *)
 
-let calling_conventions first_int last_int first_float last_float make_stack
+let size_domainstate_args = 64 * size_int
+
+let calling_conventions first_int last_int first_float last_float
+                        make_stack first_stack
                         arg =
   let loc = Array.make (Array.length arg) Reg.dummy in
   let int = ref first_int in
   let float = ref first_float in
-  let ofs = ref 0 in
+  let ofs = ref first_stack in
   for i = 0 to Array.length arg - 1 do
     match arg.(i) with
     | Val | Int | Addr as ty ->
@@ -183,21 +180,29 @@ let calling_conventions first_int last_int first_float last_float make_stack
           ofs := !ofs + size_float
         end
   done;
-  (loc, Misc.align !ofs 16)  (* keep stack 16-aligned *)
+  (loc, Misc.align (max 0 !ofs) 16)  (* keep stack 16-aligned *)
 
-let incoming ofs = Incoming ofs
-let outgoing ofs = Outgoing ofs
+let incoming ofs =
+  if ofs >= 0
+  then Incoming ofs
+  else Domainstate (ofs + size_domainstate_args)
+let outgoing ofs =
+  if ofs >= 0
+  then Outgoing ofs
+  else Domainstate (ofs + size_domainstate_args)
 let not_supported _ofs = fatal_error "Proc.loc_results: cannot call"
 
 let loc_arguments arg =
-  calling_conventions 0 9 100 109 outgoing arg
+  calling_conventions 0 9 100 109 outgoing (- size_domainstate_args) arg
 let loc_parameters arg =
   let (loc, _ofs) =
-    calling_conventions 0 9 100 109 incoming arg
-  in
-  loc
+    calling_conventions 0 9 100 109 incoming (- size_domainstate_args) arg
+  in loc
 let loc_results res =
-  let (loc, _ofs) = calling_conventions 0 0 100 100 not_supported res in loc
+  let (loc, _ofs) = calling_conventions 0 0 100 100 not_supported 0 res
+  in loc
+
+let max_arguments_for_tailcalls = 10 (* in regs *) + 64 (* in domain state *)
 
 (* C calling conventions under Unix:
      first integer args in rdi, rsi, rdx, rcx, r8, r9
@@ -213,10 +218,10 @@ let loc_results res =
      Return value in rax or xmm0. *)
 
 let loc_external_results res =
-  let (loc, _ofs) = calling_conventions 0 0 100 100 not_supported res in loc
+  let (loc, _ofs) = calling_conventions 0 0 100 100 not_supported 0 res in loc
 
 let unix_loc_external_arguments arg =
-  calling_conventions 2 7 100 107 outgoing arg
+  calling_conventions 2 7 100 107 outgoing 0 arg
 
 let win64_int_external_arguments =
   [| 5 (*rcx*); 4 (*rdx*); 6 (*r8*); 7 (*r9*) |]
@@ -226,7 +231,7 @@ let win64_float_external_arguments =
 let win64_loc_external_arguments arg =
   let loc = Array.make (Array.length arg) Reg.dummy in
   let reg = ref 0
-  and ofs = ref 32 in
+  and ofs = ref 0 in
   for i = 0 to Array.length arg - 1 do
     match arg.(i) with
     | Val | Int | Addr as ty ->
@@ -275,22 +280,21 @@ let dwarf_register_numbers ~reg_class =
 
 let stack_ptr_dwarf_register_number = 7
 
-(* Volatile registers: none *)
-
-let regs_are_volatile _rs = false
-
 (* Registers destroyed by operations *)
 
 let destroyed_at_c_call =
+  (* C calling conventions preserve rbx, but it is clobbered
+     by the code sequence used for C calls in emit.mlp, so it
+     is marked as destroyed. *)
   if win64 then
-    (* Win64: rbx, rbp, rsi, rdi, r12-r15, xmm6-xmm15 preserved *)
+    (* Win64: rsi, rdi, r12-r15, xmm6-xmm15 preserved *)
     Array.of_list(List.map phys_reg
-      [0;4;5;6;7;10;11;
+      [0;1;4;5;6;7;10;11;12;
        100;101;102;103;104;105])
   else
-    (* Unix: rbp, rbx, r12-r15 preserved *)
+    (* Unix: r12-r15 preserved *)
     Array.of_list(List.map phys_reg
-      [0;2;3;4;5;6;7;10;11;
+      [0;1;2;3;4;5;6;7;10;11;
        100;101;102;103;104;105;106;107;
        108;109;110;111;112;113;114;115])
 
@@ -301,9 +305,12 @@ let destroyed_at_alloc_or_poll =
     [| r11 |]
 
 let destroyed_at_oper = function
-    Iop(Icall_ind | Icall_imm _ | Iextcall { alloc = true; }) ->
-    all_phys_regs
-  | Iop(Iextcall { alloc = false; }) -> destroyed_at_c_call
+    Iop(Icall_ind | Icall_imm _) ->
+      all_phys_regs
+  | Iop(Iextcall {alloc; stack_ofs; }) ->
+      assert (stack_ofs >= 0);
+      if alloc || stack_ofs > 0 then all_phys_regs
+      else destroyed_at_c_call
   | Iop(Iintop(Idiv | Imod)) | Iop(Iintop_imm((Idiv | Imod), _))
         -> [| rax; rdx |]
   | Iop(Istore(Single, _, _)) -> [| rxmm15 |]
@@ -331,31 +338,28 @@ let safe_register_pressure = function
     Iextcall _ -> if win64 then if fp then 7 else 8 else 0
   | _ -> if fp then 10 else 11
 
-let max_register_pressure = function
+let max_register_pressure =
+  let consumes ~int ~float =
+    if fp
+    then [| 12 - int; 16 - float |]
+    else [| 13 - int; 16 - float |]
+  in
+  function
     Iextcall _ ->
-      if win64 then
-        if fp then [| 7; 10 |]  else [| 8; 10 |]
-        else
-        if fp then [| 3; 0 |] else  [| 4; 0 |]
+      if win64
+      then consumes ~int:5 ~float:6
+      else consumes ~int:9 ~float:16
   | Iintop(Idiv | Imod) | Iintop_imm((Idiv | Imod), _) ->
-    if fp then [| 10; 16 |] else [| 11; 16 |]
+      consumes ~int:2 ~float:0
   | Ialloc _ | Ipoll _ ->
-    if fp then [| 11 - num_destroyed_by_plt_stub; 16 |]
-    else [| 12 - num_destroyed_by_plt_stub; 16 |]
+      consumes ~int:(1 + num_destroyed_by_plt_stub) ~float:0
   | Iintop(Icomp _) | Iintop_imm((Icomp _), _) ->
-    if fp then [| 11; 16 |] else [| 12; 16 |]
+      consumes ~int:1 ~float:0
   | Istore(Single, _, _) ->
-    if fp then [| 12; 15 |] else [| 13; 15 |]
-  | _ -> if fp then [| 12; 16 |] else [| 13; 16 |]
-
-(* Layout of the stack frame *)
-
-let frame_required fd =
-  fp || fd.fun_contains_calls ||
-  fd.fun_num_stack_slots.(0) > 0 || fd.fun_num_stack_slots.(1) > 0
-
-let prologue_required fd =
-  frame_required fd
+      consumes ~int:0 ~float:1
+  | Icompf _ ->
+      consumes ~int:0 ~float:1
+  | _ -> consumes ~int:0 ~float:0
 
 (* Calling the assembler *)
 

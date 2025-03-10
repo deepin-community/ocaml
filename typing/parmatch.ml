@@ -20,6 +20,23 @@ open Asttypes
 open Types
 open Typedtree
 
+type 'pattern parmatch_case =
+  { pattern : 'pattern;
+    has_guard : bool;
+    needs_refute : bool;
+  }
+
+let typed_case { c_lhs; c_guard; c_rhs } =
+  { pattern = c_lhs;
+    has_guard = Option.is_some c_guard;
+    needs_refute = (c_rhs.exp_desc = Texp_unreachable);
+  }
+
+let untyped_case { Parsetree.pc_lhs; pc_guard; pc_rhs } =
+  { pattern = pc_lhs;
+    has_guard = Option.is_some pc_guard;
+    needs_refute = (pc_rhs.pexp_desc = Parsetree.Pexp_unreachable);
+  }
 
 (*************************************)
 (* Utilities for building patterns   *)
@@ -37,7 +54,8 @@ let omega_list = Patterns.omega_list
 
 let extra_pat =
   make_pat
-    (Tpat_var (Ident.create_local "+", mknoloc "+"))
+    (Tpat_var (Ident.create_local "+", mknoloc "+",
+      Uid.internal_not_actually_unique))
     Ctype.none Env.empty
 
 
@@ -231,7 +249,7 @@ let first_column simplified_matrix =
 *)
 
 
-let is_absent tag row = Btype.row_field tag !row = Rabsent
+let is_absent tag row = row_field_repr (get_row_field tag !row) = Rabsent
 
 let is_absent_pat d =
   match d.pat_desc with
@@ -283,8 +301,8 @@ module Compat
   | ((Tpat_any|Tpat_var _),_)
   | (_,(Tpat_any|Tpat_var _)) -> true
 (* Structural induction *)
-  | Tpat_alias (p,_,_),_      -> compat p q
-  | _,Tpat_alias (q,_,_)      -> compat p q
+  | Tpat_alias (p,_,_,_),_      -> compat p q
+  | _,Tpat_alias (q,_,_,_)      -> compat p q
   | Tpat_or (p1,p2,_),_ ->
       (compat p1 q || compat p2 q)
   | _,Tpat_or (q1,q2,_) ->
@@ -339,12 +357,12 @@ exception Empty (* Empty pattern *)
 
 (* May need a clean copy, cf. PR#4745 *)
 let clean_copy ty =
-  if ty.level = Btype.generic_level then ty
+  if get_level ty = Btype.generic_level then ty
   else Subst.type_expr Subst.identity ty
 
 let get_constructor_type_path ty tenv =
-  let ty = Ctype.repr (Ctype.expand_head tenv (clean_copy ty)) in
-  match ty.desc with
+  let ty = Ctype.expand_head tenv (clean_copy ty) in
+  match get_desc ty with
   | Tconstr (path,_,_) -> path
   | _ -> assert false
 
@@ -486,26 +504,15 @@ let rec read_args xs r = match xs,r with
 | _,_ ->
     fatal_error "Parmatch.read_args"
 
-let do_set_args ~erase_mutable q r = match q with
+let set_args q r = match q with
 | {pat_desc = Tpat_tuple omegas} ->
     let args,rest = read_args omegas r in
     make_pat (Tpat_tuple args) q.pat_type q.pat_env::rest
 | {pat_desc = Tpat_record (omegas,closed)} ->
     let args,rest = read_args omegas r in
-    make_pat
-      (Tpat_record
-         (List.map2 (fun (lid, lbl,_) arg ->
-           if
-             erase_mutable &&
-             (match lbl.lbl_mut with
-             | Mutable -> true | Immutable -> false)
-           then
-             lid, lbl, omega
-           else
-             lid, lbl, arg)
-            omegas args, closed))
-      q.pat_type q.pat_env::
-    rest
+    let args =
+      List.map2 (fun (lid, lbl, _) arg -> (lid, lbl, arg)) omegas args in
+    make_pat (Tpat_record (args, closed)) q.pat_type q.pat_env :: rest
 | {pat_desc = Tpat_construct (lid, c, omegas, _)} ->
     let args,rest = read_args omegas r in
     make_pat
@@ -535,10 +542,8 @@ let do_set_args ~erase_mutable q r = match q with
     rest
 | {pat_desc=Tpat_constant _|Tpat_any} ->
     q::r (* case any is used in matching.ml *)
-| _ -> fatal_error "Parmatch.set_args"
-
-let set_args q r = do_set_args ~erase_mutable:false q r
-and set_args_erase_mutable q r = do_set_args ~erase_mutable:true q r
+| {pat_desc = (Tpat_var _ | Tpat_alias _ | Tpat_or _); _} ->
+    fatal_error "Parmatch.set_args"
 
 (* Given a matrix of non-empty rows
    p1 :: r1...
@@ -717,23 +722,26 @@ let mark_partial =
   )
 
 let close_variant env row =
-  let row = Btype.row_repr row in
-  let nm =
+  let Row {fields; more; name=orig_name; closed; fixed} = row_repr row in
+  let name, static =
     List.fold_left
-      (fun nm (_tag,f) ->
-        match Btype.row_field_repr f with
-        | Reither(_, _, false, e) ->
-            (* m=false means that this tag is not explicitly matched *)
-            Btype.set_row_field e Rabsent;
-            None
-        | Rabsent | Reither (_, _, true, _) | Rpresent _ -> nm)
-      row.row_name row.row_fields in
-  if not row.row_closed || nm != row.row_name then begin
+      (fun (nm, static) (_tag,f) ->
+        match row_field_repr f with
+        | Reither(_, _, false) ->
+            (* fixed=false means that this tag is not explicitly matched *)
+            link_row_field_ext ~inside:f rf_absent;
+            (None, static)
+        | Reither (_, _, true) -> (nm, false)
+        | Rabsent | Rpresent _ -> (nm, static))
+      (orig_name, true) fields in
+  if not closed || name != orig_name then begin
+    let more' = if static then Btype.newgenty Tnil else Btype.newgenvar () in
     (* this unification cannot fail *)
-    Ctype.unify env row.row_more
+    Ctype.unify env more
       (Btype.newgenty
-         (Tvariant {row with row_fields = []; row_more = Btype.newgenvar();
-                    row_closed = true; row_name = nm}))
+         (Tvariant
+            (create_row ~fields:[] ~more:more'
+               ~closed:true ~name ~fixed)))
   end
 
 (*
@@ -759,22 +767,22 @@ let full_match closing env =  match env with
           env
       in
       let row = type_row () in
-      if closing && not (Btype.row_fixed row) then
+      if closing && not (Btype.has_fixed_explanation row) then
         (* closing=true, we are considering the variant as closed *)
         List.for_all
           (fun (tag,f) ->
-            match Btype.row_field_repr f with
-              Rabsent | Reither(_, _, false, _) -> true
-            | Reither (_, _, true, _)
+            match row_field_repr f with
+              Rabsent | Reither(_, _, false) -> true
+            | Reither (_, _, true)
                 (* m=true, do not discard matched tags, rather warn *)
             | Rpresent _ -> List.mem tag fields)
-          row.row_fields
+          (row_fields row)
       else
-        row.row_closed &&
+        row_closed row &&
         List.for_all
           (fun (tag,f) ->
-            Btype.row_field_repr f = Rabsent || List.mem tag fields)
-          row.row_fields
+            row_field_repr f = Rabsent || List.mem tag fields)
+          (row_fields row)
   | Constant Const_char _ ->
       List.length env = 256
   | Constant _
@@ -820,13 +828,11 @@ let pat_of_constrs ex_pat cstrs =
   if cstrs = [] then raise Empty else
   orify_many (List.map (pat_of_constr ex_pat) cstrs)
 
-let pats_of_type ?(always=false) env ty =
-  let ty' = Ctype.expand_head env ty in
-  match ty'.desc with
-  | Tconstr (path, _, _) ->
+let pats_of_type env ty =
+  match Ctype.extract_concrete_typedecl env ty with
+  | Typedecl (_, path, {type_kind = Type_variant _ | Type_record _}) ->
       begin match Env.find_type_descrs path env with
-      | exception Not_found -> [omega]
-      | Type_variant (cstrs,_) when always || List.length cstrs <= 1 ||
+      | Type_variant (cstrs,_) when List.length cstrs <= 1 ||
         (* Only explode when all constructors are GADTs *)
         List.for_all (fun cd -> cd.cstr_generalized) cstrs ->
           List.map (pat_of_constr (make_pat Tpat_any ty env)) cstrs
@@ -837,24 +843,24 @@ let pats_of_type ?(always=false) env ty =
               labels
           in
           [make_pat (Tpat_record (fields, Closed)) ty env]
-      | Type_variant _ | Type_abstract | Type_open -> [omega]
+      | _ -> [omega]
       end
-  | Ttuple tl ->
-      [make_pat (Tpat_tuple (omegas (List.length tl))) ty env]
-  | _ -> [omega]
+  | Has_no_typedecl ->
+      begin match get_desc (Ctype.expand_head env ty) with
+        Ttuple tl ->
+          [make_pat (Tpat_tuple (omegas (List.length tl))) ty env]
+      | _ -> [omega]
+      end
+  | Typedecl (_, _, {type_kind = Type_abstract _ | Type_open})
+  | May_have_typedecl -> [omega]
 
-let rec get_variant_constructors env ty =
-  match (Ctype.repr ty).desc with
-  | Tconstr (path,_,_) -> begin
-      try match Env.find_type path env, Env.find_type_descrs path env with
-      | _, Type_variant (cstrs,_) -> cstrs
-      | {type_manifest = Some _}, _ ->
-          get_variant_constructors env
-            (Ctype.expand_head_once env (clean_copy ty))
+let get_variant_constructors env ty =
+  match Ctype.extract_concrete_typedecl env ty with
+  | Typedecl (_, path, {type_kind = Type_variant _}) ->
+      begin match Env.find_type_descrs path env with
+      | Type_variant (cstrs,_) -> cstrs
       | _ -> fatal_error "Parmatch.get_variant_constructors"
-      with Not_found ->
-        fatal_error "Parmatch.get_variant_constructors"
-    end
+      end
   | _ -> fatal_error "Parmatch.get_variant_constructors"
 
 module ConstructorSet = Set.Make(struct
@@ -918,7 +924,8 @@ let build_other ext env =
           (* let c = {c with cstr_name = "*extension*"} in *) (* PR#7330 *)
           make_pat
             (Tpat_var (Ident.create_local "*extension*",
-                       {txt="*extension*"; loc = d.pat_loc}))
+                       {txt="*extension*"; loc = d.pat_loc},
+                       Uid.internal_not_actually_unique))
             Ctype.none Env.empty
       | Construct _ ->
           begin match ext with
@@ -949,16 +956,16 @@ let build_other ext env =
               List.fold_left
                 (fun others (tag,f) ->
                   if List.mem tag tags then others else
-                  match Btype.row_field_repr f with
+                  match row_field_repr f with
                     Rabsent (* | Reither _ *) -> others
                   (* This one is called after erasing pattern info *)
-                  | Reither (c, _, _, _) -> make_other_pat tag c :: others
+                  | Reither (c, _, _) -> make_other_pat tag c :: others
                   | Rpresent arg -> make_other_pat tag (arg = None) :: others)
-                [] row.row_fields
+                [] (row_fields row)
             with
               [] ->
                 let tag =
-                  if Btype.row_fixed row then some_private_tag else
+                  if Btype.has_fixed_explanation row then some_private_tag else
                   let rec mktag tag =
                     if List.mem tag tags then mktag (tag ^ "'") else tag in
                   mktag "AnyOtherTag"
@@ -1048,7 +1055,7 @@ let build_other ext env =
 let rec has_instance p = match p.pat_desc with
   | Tpat_variant (l,_,r) when is_absent l r -> false
   | Tpat_any | Tpat_var _ | Tpat_constant _ | Tpat_variant (_,None,_) -> true
-  | Tpat_alias (p,_,_) | Tpat_variant (_,Some p,_) -> has_instance p
+  | Tpat_alias (p,_,_,_) | Tpat_variant (_,Some p,_) -> has_instance p
   | Tpat_or (p1,p2,_) -> has_instance p1 || has_instance p2
   | Tpat_construct (_,_,ps,_) | Tpat_tuple ps | Tpat_array ps ->
       has_instances ps
@@ -1434,7 +1441,7 @@ let rec pressure_variants tdefs = function
                 match d.pat_desc with
                 | Variant { type_row; _ } ->
                   let row = type_row () in
-                  if Btype.row_fixed row
+                  if Btype.has_fixed_explanation row
                   || pressure_variants None default then ()
                   else close_variant env row
                 | _ -> ()
@@ -1502,7 +1509,7 @@ let is_var_column rs =
 (* Standard or-args for left-to-right matching *)
 let rec or_args p = match p.pat_desc with
 | Tpat_or (p1,p2,_) -> p1,p2
-| Tpat_alias (p,_,_)  -> or_args p
+| Tpat_alias (p,_,_,_)  -> or_args p
 | _                 -> assert false
 
 (* Just remove current column *)
@@ -1582,7 +1589,7 @@ let extract_columns pss qs = match pss with
 
 let rec every_satisfiables pss qs = match qs.active with
 | []     ->
-    (* qs is now partitionned,  check usefulness *)
+    (* qs is now partitioned,  check usefulness *)
     begin match qs.ors with
     | [] -> (* no or-patterns *)
         if satisfiable (make_matrix pss) (make_vector qs) then
@@ -1682,8 +1689,8 @@ and every_both pss qs q1 q2 =
 let rec le_pat p q =
   match (p.pat_desc, q.pat_desc) with
   | (Tpat_var _|Tpat_any),_ -> true
-  | Tpat_alias(p,_,_), _ -> le_pat p q
-  | _, Tpat_alias(q,_,_) -> le_pat p q
+  | Tpat_alias(p,_,_,_), _ -> le_pat p q
+  | _, Tpat_alias(q,_,_,_) -> le_pat p q
   | Tpat_constant(c1), Tpat_constant(c2) -> const_compare c1 c2 = 0
   | Tpat_construct(_,c1,ps,_), Tpat_construct(_,c2,qs,_) ->
       Types.equal_tag c1.cstr_tag c2.cstr_tag && le_pats ps qs
@@ -1714,6 +1721,10 @@ let get_mins le ps =
         if List.exists (fun p0 -> le p0 p) ps
         then select_rec r ps
         else select_rec (p::r) ps in
+  (* [select_rec] removes the elements that are followed by a smaller element.
+     An element that is preceded by a smaller element may stay in the list.
+     We thus do two passes on the list, which is returned reversed
+     the first time. *)
   select_rec [] (select_rec [] ps)
 
 (*
@@ -1722,8 +1733,8 @@ let get_mins le ps =
 *)
 
 let rec lub p q = match p.pat_desc,q.pat_desc with
-| Tpat_alias (p,_,_),_      -> lub p q
-| _,Tpat_alias (q,_,_)      -> lub p q
+| Tpat_alias (p,_,_,_),_      -> lub p q
+| _,Tpat_alias (q,_,_,_)      -> lub p q
 | (Tpat_any|Tpat_var _),_ -> q
 | _,(Tpat_any|Tpat_var _) -> p
 | Tpat_or (p1,p2,_),_     -> orlub p1 p2 q
@@ -1821,8 +1832,8 @@ let pressure_variants_in_computation_pattern tdefs patl =
 
 let rec initial_matrix = function
     [] -> []
-  | {c_guard=Some _} :: rem -> initial_matrix rem
-  | {c_guard=None; c_lhs=p} :: rem -> [p] :: initial_matrix rem
+  | {has_guard=true} :: rem -> initial_matrix rem
+  | {has_guard=false; pattern=p} :: rem -> [p] :: initial_matrix rem
 
 (*
    Build up a working pattern matrix by keeping
@@ -1830,9 +1841,9 @@ let rec initial_matrix = function
 *)
 let rec initial_only_guarded = function
   | [] -> []
-  | { c_guard = None; _} :: rem ->
+  | { has_guard = false; _} :: rem ->
       initial_only_guarded rem
-  | { c_lhs = pat; _ } :: rem ->
+  | { pattern = pat; _ } :: rem ->
       [pat] :: initial_only_guarded rem
 
 
@@ -1840,101 +1851,13 @@ let rec initial_only_guarded = function
 (* Exhaustiveness check *)
 (************************)
 
-(* conversion from Typedtree.pattern to Parsetree.pattern list *)
-module Conv = struct
-  open Parsetree
-  let mkpat desc = Ast_helper.Pat.mk desc
-
-  let name_counter = ref 0
-  let fresh name =
-    let current = !name_counter in
-    name_counter := !name_counter + 1;
-    "#$" ^ name ^ Int.to_string current
-
-  let conv typed =
-    let constrs = Hashtbl.create 7 in
-    let labels = Hashtbl.create 7 in
-    let rec loop pat =
-      match pat.pat_desc with
-        Tpat_or (pa,pb,_) ->
-          mkpat (Ppat_or (loop pa, loop pb))
-      | Tpat_var (_, ({txt="*extension*"} as nm)) -> (* PR#7330 *)
-          mkpat (Ppat_var nm)
-      | Tpat_any
-      | Tpat_var _ ->
-          mkpat Ppat_any
-      | Tpat_constant c ->
-          mkpat (Ppat_constant (Untypeast.constant c))
-      | Tpat_alias (p,_,_) -> loop p
-      | Tpat_tuple lst ->
-          mkpat (Ppat_tuple (List.map loop lst))
-      | Tpat_construct (cstr_lid, cstr, lst, _) ->
-          let id = fresh cstr.cstr_name in
-          let lid = { cstr_lid with txt = Longident.Lident id } in
-          Hashtbl.add constrs id cstr;
-          let arg =
-            match List.map loop lst with
-            | []  -> None
-            | [p] -> Some ([], p)
-            | lst -> Some ([], mkpat (Ppat_tuple lst))
-          in
-          mkpat (Ppat_construct(lid, arg))
-      | Tpat_variant(label,p_opt,_row_desc) ->
-          let arg = Option.map loop p_opt in
-          mkpat (Ppat_variant(label, arg))
-      | Tpat_record (subpatterns, _closed_flag) ->
-          let fields =
-            List.map
-              (fun (_, lbl, p) ->
-                let id = fresh lbl.lbl_name in
-                Hashtbl.add labels id lbl;
-                (mknoloc (Longident.Lident id), loop p))
-              subpatterns
-          in
-          mkpat (Ppat_record (fields, Open))
-      | Tpat_array lst ->
-          mkpat (Ppat_array (List.map loop lst))
-      | Tpat_lazy p ->
-          mkpat (Ppat_lazy (loop p))
-    in
-    let ps = loop typed in
-    (ps, constrs, labels)
-end
-
-
 (* Whether the counter-example contains an extension pattern *)
 let contains_extension pat =
   exists_pattern
     (function
-     | {pat_desc=Tpat_var (_, {txt="*extension*"})} -> true
+     | {pat_desc=Tpat_var (_, {txt="*extension*"}, _)} -> true
      | _ -> false)
     pat
-
-(* Build a pattern from its expected type *)
-type pat_explosion = PE_single | PE_gadt_cases
-type ppat_of_type =
-  | PT_empty
-  | PT_any
-  | PT_pattern of
-      pat_explosion *
-      Parsetree.pattern *
-      (string, constructor_description) Hashtbl.t *
-      (string, label_description) Hashtbl.t
-
-let ppat_of_type env ty =
-  match pats_of_type env ty with
-  | [] -> PT_empty
-  | [{pat_desc = Tpat_any}] -> PT_any
-  | [pat] ->
-      let (ppat, constrs, labels) = Conv.conv pat in
-      PT_pattern (PE_single, ppat, constrs, labels)
-  | pats ->
-      let (ppat, constrs, labels) = Conv.conv (orify_many pats) in
-      PT_pattern (PE_gadt_cases, ppat, constrs, labels)
-
-let typecheck ~pred p =
-  let (pattern,constrs,labels) = Conv.conv p in
-  pred constrs labels pattern
 
 let do_check_partial ~pred loc casel pss = match pss with
 | [] ->
@@ -1955,29 +1878,26 @@ let do_check_partial ~pred loc casel pss = match pss with
     Partial
 | ps::_  ->
     let counter_examples =
-      exhaust None pss (List.length ps)
-      |> Seq.filter_map (typecheck ~pred) in
+      exhaust None pss (List.length ps) |> Seq.filter_map pred in
     match counter_examples () with
     | Seq.Nil -> Total
     | Seq.Cons (v, _rest) ->
       if Warnings.is_active (Warnings.Partial_match "") then begin
         let errmsg =
-          try
-            let buf = Buffer.create 16 in
-            let fmt = Format.formatter_of_buffer buf in
-            Printpat.top_pretty fmt v;
-            if do_match (initial_only_guarded casel) [v] then
-              Buffer.add_string buf
-                "\n(However, some guarded clause may match this value.)";
-            if contains_extension v then
-              Buffer.add_string buf
-                "\nMatching over values of extensible variant types \
-                   (the *extension* above)\n\
-              must include a wild card pattern in order to be exhaustive."
-            ;
-            Buffer.contents buf
-          with _ ->
-            ""
+          let doc = ref Format_doc.Doc.empty in
+          let fmt = Format_doc.formatter doc in
+          Format_doc.fprintf fmt "@[<v>%a" Printpat.top_pretty v;
+          if do_match (initial_only_guarded casel) [v] then
+            Format_doc.fprintf fmt
+              "@,(However, some guarded clause may match this value.)";
+          if contains_extension v then
+            Format_doc.fprintf fmt
+              "@,@[Matching over values of extensible variant types \
+               (the *extension* above)@,\
+               must include a wild card pattern@ in order to be exhaustive.@]"
+          ;
+          Format_doc.fprintf fmt "@]";
+          Format_doc.(asprintf "%a" pp_doc) !doc
         in
         Location.prerr_warning loc (Warnings.Partial_match errmsg)
       end;
@@ -2018,7 +1938,8 @@ let rec collect_paths_from_pat r p = match p.pat_desc with
     List.fold_left
       (fun r (_, _, p) -> collect_paths_from_pat r p)
       r lps
-| Tpat_variant (_, Some p, _) | Tpat_alias (p,_,_) -> collect_paths_from_pat r p
+| Tpat_variant (_, Some p, _) | Tpat_alias (p,_,_,_) ->
+    collect_paths_from_pat r p
 | Tpat_or (p1,p2,_) ->
     collect_paths_from_pat (collect_paths_from_pat r p1) p2
 | Tpat_lazy p
@@ -2036,7 +1957,7 @@ let rec collect_paths_from_pat r p = match p.pat_desc with
 let do_check_fragile loc casel pss =
   let exts =
     List.fold_left
-      (fun r c -> collect_paths_from_pat r c.c_lhs)
+      (fun r c -> collect_paths_from_pat r c.pattern)
       [] casel in
   match exts with
   | [] -> ()
@@ -2060,10 +1981,10 @@ let do_check_fragile loc casel pss =
 
 let check_unused pred casel =
   if Warnings.is_active Warnings.Redundant_case
-  || List.exists (fun c -> c.c_rhs.exp_desc = Texp_unreachable) casel then
+  || List.exists (fun vc -> vc.needs_refute) casel then
     let rec do_rec pref = function
       | [] -> ()
-      | {c_lhs=q; c_guard; c_rhs} :: rem ->
+      | {pattern=q; has_guard; needs_refute=refute} :: rem ->
           let qs = [q] in
             begin try
               let pss =
@@ -2074,7 +1995,6 @@ let check_unused pred casel =
                 |> get_mins le_pats in
               (* First look for redundant or partially redundant patterns *)
               let r = every_satisfiables (make_rows pss) (make_row qs) in
-              let refute = (c_rhs.exp_desc = Texp_unreachable) in
               (* Do not warn for unused [pat -> .] *)
               if r = Unused && refute then () else
               let r =
@@ -2099,9 +2019,8 @@ let check_unused pred casel =
                   List.map (function [u] -> u | _ -> assert false) sfs in
                 let u = orify_many sfs in
                 (*Format.eprintf "%a@." pretty_val u;*)
-                let (pattern,constrs,labels) = Conv.conv u in
-                let pattern = {pattern with Parsetree.ppat_loc = q.pat_loc} in
-                match pred refute constrs labels pattern with
+                let pattern = {u with pat_loc = q.pat_loc} in
+                match pred refute pattern with
                   None when not refute ->
                     Location.prerr_warning q.pat_loc Warnings.Unreachable_case;
                     Used
@@ -2121,7 +2040,7 @@ let check_unused pred casel =
             with Empty | Not_found -> assert false
             end ;
 
-          if c_guard <> None then
+          if has_guard then
             do_rec pref rem
           else
             do_rec ([q]::pref) rem in
@@ -2146,13 +2065,13 @@ let inactive ~partial pat =
             true
         | Tpat_constant c -> begin
             match c with
-            | Const_string _ -> Config.safe_string
+            | Const_string _
             | Const_int _ | Const_char _ | Const_float _
             | Const_int32 _ | Const_int64 _ | Const_nativeint _ -> true
           end
         | Tpat_tuple ps | Tpat_construct (_, _, ps, _) ->
             List.for_all (fun p -> loop p) ps
-        | Tpat_alias (p,_,_) | Tpat_variant (_, Some p, _) ->
+        | Tpat_alias (p,_,_,_) | Tpat_variant (_, Some p, _) ->
             loop p
         | Tpat_record (ldps,_) ->
             List.for_all
@@ -2271,9 +2190,9 @@ type amb_row = { row : pattern list ; varsets : Ident.Set.t list; }
 let simplify_head_amb_pat head_bound_variables varsets ~add_column p ps k =
   let rec simpl head_bound_variables varsets p ps k =
     match (Patterns.General.view p).pat_desc with
-    | `Alias (p,x,_) ->
+    | `Alias (p,x,_,_) ->
       simpl (Ident.Set.add x head_bound_variables) varsets p ps k
-    | `Var (x, _) ->
+    | `Var (x,_,_) ->
       simpl (Ident.Set.add x head_bound_variables) varsets Patterns.omega ps k
     | `Or (p1,p2,_) ->
       simpl head_bound_variables varsets p1 ps
@@ -2401,52 +2320,17 @@ let pattern_stable_vars ns p =
 
 (* All identifier paths that appear in an expression that occurs
    as a clause right hand side or guard.
-
-  The function is rather complex due to the compilation of
-  unpack patterns by introducing code in rhs expressions
-  and **guards**.
-
-  For pattern (module M:S)  -> e the code is
-  let module M_mod = unpack M .. in e
-
-  Hence M is "free" in e iff M_mod is free in e.
-
-  Not doing so will yield excessive  warning in
-  (module (M:S) } ...) when true -> ....
-  as M is always present in
-  let module M_mod = unpack M .. in true
 *)
 
 let all_rhs_idents exp =
   let ids = ref Ident.Set.empty in
-(* Very hackish, detect unpack pattern  compilation
-   and perform "indirect check for them" *)
-  let is_unpack exp =
-      List.exists
-        (fun attr -> attr.Parsetree.attr_name.txt = "#modulepat")
-        exp.exp_attributes in
   let open Tast_iterator in
   let expr_iter iter exp =
-    (match exp.exp_desc with
-      | Texp_ident (path, _lid, _descr) ->
+    match exp.exp_desc with
+    | Texp_ident (path, _lid, _descr) ->
         List.iter (fun id -> ids := Ident.Set.add id !ids) (Path.heads path)
-      (* Use default iterator methods for rest of match.*)
-      | _ -> Tast_iterator.default_iterator.expr iter exp);
-
-    if is_unpack exp then begin match exp.exp_desc with
-    | Texp_letmodule
-        (id_mod,_,_,
-         {mod_desc=
-          Tmod_unpack ({exp_desc=Texp_ident (Path.Pident id_exp,_,_)},_)},
-         _) ->
-           assert (Ident.Set.mem id_exp !ids) ;
-           begin match id_mod with
-           | Some id_mod when not (Ident.Set.mem id_mod !ids) ->
-             ids := Ident.Set.remove id_exp !ids
-           | _ -> ()
-           end
-    | _ -> assert false
-    end
+    (* Use default iterator methods for rest of match.*)
+    | _ -> Tast_iterator.default_iterator.expr iter exp
   in
   let iterator = {Tast_iterator.default_iterator with expr = expr_iter} in
   iterator.expr iterator exp;
@@ -2459,7 +2343,7 @@ let check_ambiguous_bindings =
     if is_active warn0 then
       let check_case ns case = match case with
         | { c_lhs = p; c_guard=None ; _} -> [p]::ns
-        | { c_lhs=p; c_guard=Some g; _} ->
+        | { c_lhs = p; c_guard=Some g; _} ->
             let all =
               Ident.Set.inter (pattern_vars p) (all_rhs_idents g) in
             if not (Ident.Set.is_empty all) then begin

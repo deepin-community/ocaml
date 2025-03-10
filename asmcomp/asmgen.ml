@@ -113,9 +113,9 @@ let rec regalloc ~ppf_dump round fd =
   let num_stack_slots =
     if !use_linscan then begin
       (* Linear Scan *)
-      Interval.build_intervals fd;
-      if !dump_interval then Printmach.intervals ppf_dump ();
-      Linscan.allocate_registers()
+      let intervals = Interval.build_intervals fd in
+      if !dump_interval then Printmach.intervals ppf_dump intervals;
+      Linscan.allocate_registers intervals
     end else begin
       (* Graph Coloring *)
       Interf.build_graph fd;
@@ -212,6 +212,11 @@ let compile_unit ~output_prefix ~asm_filename ~keep_asm ~obj_filename gen =
   let create_asm = should_emit () &&
                    (keep_asm || not !Emitaux.binary_backend_available) in
   Emitaux.create_asm_file := create_asm;
+  let remove_asm_file () =
+    (* if [should_emit ()] is [false] then no assembly is generated,
+       so the (empty) temporary file should be deleted. *)
+    if not create_asm || not keep_asm then remove_file asm_filename
+  in
   Misc.try_finally
     ~exceptionally:(fun () -> remove_file obj_filename)
     (fun () ->
@@ -222,8 +227,7 @@ let compile_unit ~output_prefix ~asm_filename ~keep_asm ~obj_filename gen =
             write_linear output_prefix)
          ~always:(fun () ->
              if create_asm then close_out !Emitaux.output_channel)
-         ~exceptionally:(fun () ->
-             if create_asm && not keep_asm then remove_file asm_filename);
+         ~exceptionally:remove_asm_file;
        if should_emit () then begin
          let assemble_result =
            Profile.record "assemble"
@@ -232,7 +236,7 @@ let compile_unit ~output_prefix ~asm_filename ~keep_asm ~obj_filename gen =
          if assemble_result <> 0
          then raise(Error(Assembler_error asm_filename));
        end;
-       if create_asm && not keep_asm then remove_file asm_filename
+       remove_asm_file ()
     )
 
 let end_gen_implementation ?toplevel ~ppf_dump
@@ -296,35 +300,40 @@ let linear_gen_implementation filename =
   Profile.record "Emit" (List.iter emit_item) linear_unit_info.items;
   emit_end_assembly ()
 
-let compile_implementation_linear output_prefix ~progname =
+let compile_implementation_linear target =
+  let output_prefix = Unit_info.prefix target in
   compile_unit ~output_prefix
     ~asm_filename:(asm_filename output_prefix) ~keep_asm:!keep_asm_file
     ~obj_filename:(output_prefix ^ ext_obj)
     (fun () ->
-      linear_gen_implementation progname)
+      linear_gen_implementation (Unit_info.source_file target))
 
 (* Error report *)
+module Style = Misc.Style
+let fprintf, dprintf = Format_doc.fprintf, Format_doc.dprintf
 
-let report_error ppf = function
+let report_error_doc ppf = function
   | Assembler_error file ->
       fprintf ppf "Assembler error, input left in file %a"
-        Location.print_filename file
+        Location.Doc.quoted_filename file
   | Mismatched_for_pack saved ->
     let msg = function
-       | None -> "without -for-pack"
-       | Some s -> "with -for-pack "^s
+       | None -> dprintf "without %a" Style.inline_code "-for-pack"
+       | Some s -> dprintf "with %a" Style.inline_code ("-for-pack " ^ s)
      in
      fprintf ppf
-       "This input file cannot be compiled %s: it was generated %s."
+       "This input file cannot be compiled %t: it was generated %t."
        (msg !Clflags.for_package) (msg saved)
   | Asm_generation(fn, err) ->
      fprintf ppf
-       "Error producing assembly code for function %s: %a"
-       fn Emitaux.report_error err
+       "Error producing assembly code for function %a: %a"
+       Style.inline_code fn Emitaux.report_error_doc err
 
 let () =
   Location.register_error_of_exn
     (function
-      | Error err -> Some (Location.error_of_printer_file report_error err)
+      | Error err -> Some (Location.error_of_printer_file report_error_doc err)
       | _ -> None
     )
+
+let report_error = Format_doc.compat report_error_doc

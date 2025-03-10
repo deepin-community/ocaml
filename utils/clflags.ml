@@ -42,10 +42,14 @@ let objfiles = ref ([] : string list)   (* .cmo and .cma files *)
 and ccobjs = ref ([] : string list)     (* .o, .a, .so and -cclib -lxxx *)
 and dllibs = ref ([] : string list)     (* .so and -dllib -lxxx *)
 
+let cmi_file = ref None
+
 let compile_only = ref false            (* -c *)
 and output_name = ref (None : string option) (* -o *)
-and include_dirs = ref ([] : string list)(* -I *)
+and include_dirs = ref ([] : string list) (* -I *)
+and hidden_include_dirs = ref ([] : string list) (* -H *)
 and no_std_include = ref false          (* -nostdlib *)
+and no_cwd = ref false                  (* -nocwd *)
 and print_types = ref false             (* -i *)
 and make_archive = ref false            (* -a *)
 and debug = ref false                   (* -g *)
@@ -63,11 +67,13 @@ and all_ccopts = ref ([] : string list)     (* -ccopt *)
 and classic = ref false                 (* -nolabels *)
 and nopervasives = ref false            (* -nopervasives *)
 and match_context_rows = ref 32         (* -match-context-rows *)
+and safer_matching = ref false          (* -safer-matching *)
 and preprocessor = ref(None : string option) (* -pp *)
 and all_ppx = ref ([] : string list)        (* -ppx *)
 let absname = ref false                 (* -absname *)
 let annotations = ref false             (* -annot *)
-let binary_annotations = ref false      (* -annot *)
+let binary_annotations = ref false      (* -bin-annot *)
+let store_occurrences = ref false       (* -bin-annot-occurrences *)
 and use_threads = ref false             (* -thread *)
 and noassert = ref false                (* -noassert *)
 and verbose = ref false                 (* -verbose *)
@@ -84,7 +90,7 @@ and principal = ref false               (* -principal *)
 and real_paths = ref true               (* -short-paths *)
 and recursive_types = ref false         (* -rectypes *)
 and strict_sequence = ref false         (* -strict-sequence *)
-and strict_formats = ref false          (* -strict-formats *)
+and strict_formats = ref true           (* -strict-formats *)
 and applicative_functors = ref true     (* -no-app-funct *)
 and make_runtime = ref false            (* -make-runtime *)
 and c_compiler = ref (None: string option) (* -cc *)
@@ -100,6 +106,7 @@ let locations = ref true                (* -d(no-)locations *)
 let dump_source = ref false             (* -dsource *)
 let dump_parsetree = ref false          (* -dparsetree *)
 and dump_typedtree = ref false          (* -dtypedtree *)
+and dump_shape = ref false              (* -dshape *)
 and dump_rawlambda = ref false          (* -drawlambda *)
 and dump_lambda = ref false             (* -dlambda *)
 and dump_rawclambda = ref false         (* -drawclambda *)
@@ -110,6 +117,8 @@ and dump_flambda_let = ref (None : int option) (* -dflambda-let=... *)
 and dump_flambda_verbose = ref false    (* -dflambda-verbose *)
 and dump_instr = ref false              (* -dinstr *)
 and keep_camlprimc_file = ref false     (* -dcamlprimc *)
+
+let keyword_edition: string option ref = ref None
 
 let keep_asm_file = ref false           (* -S *)
 let optimize_for_speed = ref true       (* -compact *)
@@ -150,28 +159,23 @@ let insn_sched = ref insn_sched_default (* -[no-]insn-sched *)
 let std_include_flag prefix =
   if !no_std_include then ""
   else (prefix ^ (Filename.quote Config.standard_library))
-;;
 
 let std_include_dir () =
   if !no_std_include then [] else [Config.standard_library]
-;;
 
 let shared = ref false (* -shared *)
 let dlcode = ref true (* not -nodynlink *)
 
 let pic_code = ref (match Config.architecture with (* -fPIC *)
-                     | "amd64" -> true
-                     | _       -> false)
+                     | "amd64" | "s390x" -> true
+                     | _                 -> false)
 
-let runtime_variant = ref "";;      (* -runtime-variant *)
-let with_runtime = ref true;;         (* -with-runtime *)
+let runtime_variant = ref ""
+
+let with_runtime = ref true         (* -with-runtime *)
 
 let keep_docs = ref false              (* -keep-docs *)
 let keep_locs = ref true               (* -keep-locs *)
-let unsafe_string =
-  if Config.safe_string then ref false
-  else ref (not Config.default_safe_string)
-                                   (* -safe-string / -unsafe-string *)
 
 let classic_inlining = ref false       (* -Oclassic *)
 let inlining_report = ref false    (* -inlining-report *)
@@ -373,6 +377,7 @@ let set_dumped_pass s enabled =
   end
 
 let dump_into_file = ref false (* -dump-into-file *)
+let dump_dir: string option ref = ref None (* -dump-dir *)
 
 type 'a env_reader = {
   parse : string -> 'a option;
@@ -462,17 +467,19 @@ module Compiler_pass = struct
      - the manpages in man/ocaml{c,opt}.m
      - the manual manual/src/cmds/unified-options.etex
   *)
-  type t = Parsing | Typing | Scheduling | Emit
+  type t = Parsing | Typing | Lambda | Scheduling | Emit
 
   let to_string = function
     | Parsing -> "parsing"
     | Typing -> "typing"
+    | Lambda -> "lambda"
     | Scheduling -> "scheduling"
     | Emit -> "emit"
 
   let of_string = function
     | "parsing" -> Some Parsing
     | "typing" -> Some Typing
+    | "lambda" -> Some Lambda
     | "scheduling" -> Some Scheduling
     | "emit" -> Some Emit
     | _ -> None
@@ -480,12 +487,14 @@ module Compiler_pass = struct
   let rank = function
     | Parsing -> 0
     | Typing -> 1
+    | Lambda -> 2
     | Scheduling -> 50
     | Emit -> 60
 
   let passes = [
     Parsing;
     Typing;
+    Lambda;
     Scheduling;
     Emit;
   ]
@@ -543,6 +552,23 @@ let set_save_ir_after pass enabled =
       other_passes
   in
   save_ir_after := new_passes
+
+let parse_keyword_edition s =
+  let parse_version s =
+  let bad_version () =
+    raise (Arg.Bad "Ill-formed version in keywords flag,\n\
+                    the supported format is <major>.<minor>, for example 5.2 .")
+  in
+  if s = "" then None else match String.split_on_char '.' s with
+  | [] | [_] | _ :: _ :: _ :: _ -> bad_version ()
+  | [major;minor] -> match int_of_string_opt major, int_of_string_opt minor with
+    | Some major, Some minor -> Some (major,minor)
+    | _ -> bad_version ()
+  in
+  match String.split_on_char '+' s with
+  | [] -> None, []
+  | [s] -> parse_version s, []
+  | v :: rest -> parse_version v, rest
 
 module String = Misc.Stdlib.String
 

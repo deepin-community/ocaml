@@ -67,14 +67,15 @@ let env_empty = {
 let oper_result_type = function
     Capply ty -> ty
   | Cextcall(_s, ty_res, _ty_args, _alloc) -> ty_res
-  | Cload (c, _) ->
-      begin match c with
+  | Cload {memory_chunk} ->
+      begin match memory_chunk with
       | Word_val -> typ_val
-      | Single | Double | Double_u -> typ_float
+      | Single | Double -> typ_float
       | _ -> typ_int
       end
   | Calloc -> typ_val
   | Cstore (_c, _) -> typ_void
+  | Cdls_get -> typ_val
   | Caddi | Csubi | Cmuli | Cmulhi | Cdivi | Cmodi |
     Cand | Cor | Cxor | Clsl | Clsr | Casr |
     Ccmpi _ | Ccmpa _ | Ccmpf _ -> typ_int
@@ -86,6 +87,7 @@ let oper_result_type = function
   | Craise _ -> typ_void
   | Ccheckbound -> typ_void
   | Copaque -> typ_val
+  | Cpoll -> typ_void
 
 (* Infer the size in bytes of the result of an expression whose evaluation
    may be deferred (cf. [emit_parts]). *)
@@ -267,7 +269,7 @@ module Effect_and_coeffect : sig
   val none : t
   val arbitrary : t
 
-  val effect : t -> Effect.t
+  val effect_ : t -> Effect.t
   val coeffect : t -> Coeffect.t
 
   val pure_and_copure : t -> bool
@@ -283,7 +285,7 @@ end = struct
   let none = Effect.None, Coeffect.None
   let arbitrary = Effect.Arbitrary, Coeffect.Arbitrary
 
-  let effect (e, _ce) = e
+  let effect_ (e, _ce) = e
   let coeffect (_e, ce) = ce
 
   let pure_and_copure (e, ce) = Effect.pure e && Coeffect.copure ce
@@ -315,6 +317,7 @@ method is_simple_expr = function
   | Cconst_float _ -> true
   | Cconst_symbol _ -> true
   | Cvar _ -> true
+  | Creturn_addr -> true
   | Ctuple el -> List.for_all self#is_simple_expr el
   | Clet(_id, arg, body) | Clet_mut(_id, _, arg, body) ->
     self#is_simple_expr arg && self#is_simple_expr body
@@ -323,12 +326,14 @@ method is_simple_expr = function
   | Cop(op, args, _) ->
       begin match op with
         (* The following may have side effects *)
-      | Capply _ | Cextcall _ | Calloc | Cstore _ | Craise _ | Copaque -> false
+      | Capply _ | Cextcall _ | Calloc | Cstore _ | Craise _ | Copaque
+      | Cpoll -> false
         (* The remaining operations are simple if their args are *)
       | Cload _ | Caddi | Csubi | Cmuli | Cmulhi | Cdivi | Cmodi | Cand | Cor
       | Cxor | Clsl | Clsr | Casr | Ccmpi _ | Caddv | Cadda | Ccmpa _ | Cnegf
       | Cabsf | Caddf | Csubf | Cmulf | Cdivf | Cfloatofint | Cintoffloat
-      | Ccmpf _ | Ccheckbound -> List.for_all self#is_simple_expr args
+      | Ccmpf _ | Ccheckbound | Cdls_get ->
+          List.for_all self#is_simple_expr args
       end
   | Cassign _ | Cifthenelse _ | Cswitch _ | Ccatch _ | Cexit _
   | Ctrywith _ -> false
@@ -349,7 +354,7 @@ method effects_of exp =
   let module EC = Effect_and_coeffect in
   match exp with
   | Cconst_int _ | Cconst_natint _ | Cconst_float _ | Cconst_symbol _
-  | Cvar _ -> EC.none
+  | Cvar _ | Creturn_addr -> EC.none
   | Ctuple el -> EC.join_list_map el self#effects_of
   | Clet (_id, arg, body) | Clet_mut (_id, _, arg, body) ->
     EC.join (self#effects_of arg) (self#effects_of body)
@@ -362,12 +367,13 @@ method effects_of exp =
   | Cop (op, args, _) ->
     let from_op =
       match op with
-      | Capply _ | Cextcall _ | Copaque -> EC.arbitrary
+      | Capply _ | Cextcall _ | Copaque | Cpoll -> EC.arbitrary
       | Calloc -> EC.none
       | Cstore _ -> EC.effect_only Effect.Arbitrary
       | Craise _ | Ccheckbound -> EC.effect_only Effect.Raise
-      | Cload (_, Asttypes.Immutable) -> EC.none
-      | Cload (_, Asttypes.Mutable) -> EC.coeffect_only Coeffect.Read_mutable
+      | Cload {mutability = Asttypes.Immutable} -> EC.none
+      | Cload {mutability = Asttypes.Mutable} | Cdls_get ->
+          EC.coeffect_only Coeffect.Read_mutable
       | Caddi | Csubi | Cmuli | Cmulhi | Cdivi | Cmodi | Cand | Cor | Cxor
       | Clsl | Clsr | Casr | Ccmpi _ | Caddv | Cadda | Ccmpa _ | Cnegf | Cabsf
       | Caddf | Csubf | Cmulf | Cdivf | Cfloatofint | Cintoffloat | Ccmpf _ ->
@@ -400,39 +406,6 @@ method virtual select_addressing :
 method select_store is_assign addr arg =
   (Istore(Word_val, addr, is_assign), arg)
 
-(* call marking methods, documented in selectgen.mli *)
-val contains_calls = ref false
-
-method mark_call =
-  contains_calls := true
-
-method mark_tailcall = ()
-
-method mark_c_tailcall = ()
-
-method mark_instr = function
-  | Iop (Icall_ind | Icall_imm _ | Iextcall _) ->
-      self#mark_call
-  | Iop (Itailcall_ind | Itailcall_imm _) ->
-      self#mark_tailcall
-  | Iop (Ialloc _) | Iop (Ipoll _) ->
-      self#mark_call (* caml_alloc*, caml_garbage_collection (incl. polls) *)
-  | Iop (Iintop (Icheckbound) | Iintop_imm(Icheckbound, _)) ->
-      self#mark_c_tailcall (* caml_ml_array_bound_error *)
-  | Iraise raise_kind ->
-    begin match raise_kind with
-      | Lambda.Raise_notrace -> ()
-      | Lambda.Raise_regular
-      | Lambda.Raise_reraise ->
-          (* PR#6239 *)
-          (* caml_stash_backtrace; we #mark_call rather than
-             #mark_c_tailcall to get a good stack backtrace *)
-          self#mark_call
-    end
-  | Itrywith _ ->
-    self#mark_call
-  | _ -> ()
-
 (* Default instruction selection for operators *)
 
 method select_operation op args _dbg =
@@ -442,10 +415,10 @@ method select_operation op args _dbg =
   | (Capply _, _) ->
     (Icall_ind, args)
   | (Cextcall(func, ty_res, ty_args, alloc), _) ->
-    Iextcall { func; ty_res; ty_args; alloc; }, args
-  | (Cload (chunk, mut), [arg]) ->
-      let (addr, eloc) = self#select_addressing chunk arg in
-      (Iload(chunk, addr, mut), [eloc])
+    Iextcall { func; alloc; ty_res; ty_args; stack_ofs = -1}, args
+  | (Cload {memory_chunk; mutability; is_atomic}, [arg]) ->
+      let (addressing_mode, eloc) = self#select_addressing memory_chunk arg in
+      (Iload {memory_chunk; addressing_mode; mutability; is_atomic}, [eloc])
   | (Cstore (chunk, init), [arg1; arg2]) ->
       let (addr, eloc) = self#select_addressing chunk arg1 in
       let is_assign =
@@ -461,6 +434,8 @@ method select_operation op args _dbg =
         (Istore(chunk, addr, is_assign), [arg2; eloc])
         (* Inversion addr/datum in Istore *)
       end
+  | (Cdls_get, _) -> Idls_get, args
+  | (Cpoll, _) -> (Ipoll { return_label = None }), args
   | (Calloc, _) -> (Ialloc {bytes = 0; dbginfo = []}), args
   | (Caddi, _) -> self#select_arith_comm Iadd args
   | (Csubi, _) -> self#select_arith Isub args
@@ -478,6 +453,7 @@ method select_operation op args _dbg =
   | (Caddv, _) -> self#select_arith_comm Iadd args
   | (Cadda, _) -> self#select_arith_comm Iadd args
   | (Ccmpa comp, _) -> self#select_arith_comp (Iunsigned comp) args
+  | (Ccmpf comp, _) -> (Icompf comp, args)
   | (Cnegf, _) -> (Inegf, args)
   | (Cabsf, _) -> (Iabsf, args)
   | (Caddf, _) -> (Iaddf, args)
@@ -626,6 +602,9 @@ method emit_expr (env:environment) exp =
          adding this register to the frame table would be redundant *)
       let r = self#regs_for typ_int in
       Some(self#insert_op env (Iconst_symbol n) [||] r)
+  | Creturn_addr ->
+      let r = self#regs_for typ_int in
+      Some(self#insert_op env Ireturn_addr [||] r)
   | Cvar v ->
       begin try
         Some(env_find v env)
@@ -672,12 +651,6 @@ method emit_expr (env:environment) exp =
           self#insert_debug env  (Iraise k) dbg rd [||];
           None
       end
-  | Cop(Ccmpf _, _, dbg) ->
-      self#emit_expr env
-        (Cifthenelse (exp,
-          dbg, Cconst_int (1, dbg),
-          dbg, Cconst_int (0, dbg),
-          dbg))
   | Cop(Copaque, args, dbg) ->
       begin match self#emit_parts_list env args with
         None -> None
@@ -712,12 +685,13 @@ method emit_expr (env:environment) exp =
               self#insert_debug env (Iop new_op) dbg loc_arg loc_res;
               self#insert_move_results env loc_res rd stack_ofs;
               Some rd
-          | Iextcall { ty_args; _} ->
+          | Iextcall r ->
               let (loc_arg, stack_ofs) =
-                self#emit_extcall_args env ty_args new_args in
+                self#emit_extcall_args env r.ty_args new_args in
               let rd = self#regs_for ty in
               let loc_res =
-                self#insert_op_debug env new_op dbg
+                self#insert_op_debug env
+                  (Iextcall {r with stack_ofs = stack_ofs}) dbg
                   loc_arg (Proc.loc_external_results (Reg.typv rd)) in
               self#insert_move_results env loc_res rd stack_ofs;
               Some rd
@@ -868,7 +842,7 @@ method private emit_parts (env:environment) ~effects_after exp =
   let module EC = Effect_and_coeffect in
   let may_defer_evaluation =
     let ec = self#effects_of exp in
-    match EC.effect ec with
+    match EC.effect_ ec with
     | Effect.Arbitrary | Effect.Raise ->
       (* Preserve the ordering of effectful expressions by evaluating them
          early (in the correct order) and assigning their results to
@@ -890,14 +864,14 @@ method private emit_parts (env:environment) ~effects_after exp =
            every [exp'] (for [exp'] as in the comment above) has no effects
            "worse" (in the sense of the ordering in [Effect.t]) than raising
            an exception. *)
-        match EC.effect effects_after with
+        match EC.effect_ effects_after with
         | Effect.None | Effect.Raise -> true
         | Effect.Arbitrary -> false
       end
       | Coeffect.Arbitrary -> begin
         (* Arbitrary expressions may only be deferred if evaluation of
            every [exp'] (for [exp'] as in the comment above) has no effects. *)
-        match EC.effect effects_after with
+        match EC.effect_ effects_after with
         | Effect.None -> true
         | Effect.Arbitrary | Effect.Raise -> false
       end
@@ -998,7 +972,7 @@ method emit_stores env data regs_addr =
             Istore(_, _, _) ->
               for i = 0 to Array.length regs - 1 do
                 let r = regs.(i) in
-                let kind = if r.typ = Float then Double_u else Word_val in
+                let kind = if r.typ = Float then Double else Word_val in
                 self#insert env
                             (Iop(Istore(kind, !a, false)))
                             (Array.append [|r|] regs_addr) [||];
@@ -1149,6 +1123,7 @@ method emit_tail (env:environment) exp =
   | Cop _
   | Cconst_int _ | Cconst_natint _ | Cconst_float _ | Cconst_symbol _
   | Cvar _
+  | Creturn_addr
   | Cassign _
   | Ctuple _
   | Cexit _ ->
@@ -1181,19 +1156,19 @@ method emit_fundecl ~future_funcnames f =
     if Polling.requires_prologue_poll ~future_funcnames
          ~fun_name:f.Cmm.fun_name body
       then
-      instr_cons (Iop(Ipoll { return_label = None })) [||] [||] body
+        instr_cons_debug
+          (Iop(Ipoll { return_label = None })) [||] [||] f.Cmm.fun_dbg body
     else
       body
     in
   let body_with_prologue = self#extract_onto polled_body in
-  instr_iter (fun instr -> self#mark_instr instr.Mach.desc) body_with_prologue;
   { fun_name = f.Cmm.fun_name;
     fun_args = loc_arg;
     fun_body = body_with_prologue;
     fun_codegen_options = f.Cmm.fun_codegen_options;
     fun_dbg  = f.Cmm.fun_dbg;
+    fun_poll = f.Cmm.fun_poll;
     fun_num_stack_slots = Array.make Proc.num_register_classes 0;
-    fun_contains_calls = !contains_calls;
   }
 
 end

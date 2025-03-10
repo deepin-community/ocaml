@@ -15,15 +15,25 @@
 
 open Format
 
+(* type of toplevel inputs *)
+type input =
+  | Stdin
+  | File of string
+  | String of string
+
 (* Accessors for the table of toplevel value bindings.  These functions
    must appear as first and second exported functions in this module.
    (See module Translmod.) *)
 val getvalue : string -> Obj.t
 val setvalue : string -> Obj.t -> unit
 
+
+val filename_of_input: input -> string
+
 (* Set the load paths, before running anything *)
 
-val set_paths : unit -> unit
+val set_paths :
+  ?auto_include:Load_path.auto_include_callback -> ?dir:string -> unit -> unit
 
 (* The interactive toplevel loop *)
 
@@ -31,7 +41,7 @@ val loop : formatter -> unit
 
 (* Read and execute a script from the given file *)
 
-val run_script : formatter -> string -> string array -> bool
+val run_script : formatter -> input -> string array -> bool
         (* true if successful, false if error *)
 
 (* Interface with toplevel directives *)
@@ -82,14 +92,15 @@ val preprocess_phrase :
       formatter -> Parsetree.toplevel_phrase ->  Parsetree.toplevel_phrase
         (* Preprocess the given toplevel phrase using regular and ppx
            preprocessors. Return the updated phrase. *)
-val use_file : formatter -> string -> bool
+val use_input : formatter -> input -> bool
 val use_output : formatter -> string -> bool
-val use_silently : formatter -> string -> bool
-val mod_use_file : formatter -> string -> bool
+val use_silently : formatter -> input -> bool
+val mod_use_input : formatter -> input -> bool
+val use_file : formatter -> string -> bool
         (* Read and execute commands from a file.
-           [use_file] prints the types and values of the results.
+           [use_input] prints the types and values of the results.
            [use_silently] does not print them.
-           [mod_use_file] wrap the file contents into a module. *)
+           [mod_use_input] wrap the file contents into a module. *)
 val eval_module_path: Env.t -> Path.t -> Obj.t
 val eval_value_path: Env.t -> Path.t -> Obj.t
 val eval_extension_path: Env.t -> Path.t -> Obj.t
@@ -133,18 +144,14 @@ val input_name : string ref
 
 val print_out_value :
   (formatter -> Outcometree.out_value -> unit) ref
-val print_out_type :
-  (formatter -> Outcometree.out_type -> unit) ref
-val print_out_class_type :
-  (formatter -> Outcometree.out_class_type -> unit) ref
-val print_out_module_type :
-  (formatter -> Outcometree.out_module_type -> unit) ref
-val print_out_type_extension :
-  (formatter -> Outcometree.out_type_extension -> unit) ref
-val print_out_sig_item :
-  (formatter -> Outcometree.out_sig_item -> unit) ref
-val print_out_signature :
-  (formatter -> Outcometree.out_sig_item list -> unit) ref
+
+type 'a oprinter := 'a Oprint.printer
+val print_out_type : Outcometree.out_type oprinter
+val print_out_class_type : Outcometree.out_class_type oprinter
+val print_out_module_type : Outcometree.out_module_type oprinter
+val print_out_type_extension : Outcometree.out_type_extension oprinter
+val print_out_sig_item : Outcometree.out_sig_item oprinter
+val print_out_signature : Outcometree.out_sig_item list oprinter
 val print_out_phrase :
   (formatter -> Outcometree.out_phrase -> unit) ref
 
@@ -185,3 +192,19 @@ val override_sys_argv : string array -> unit
    This is called by [run_script] so that [Sys.argv] represents
    "script.ml args..." instead of the full command line:
    "ocamlrun unix.cma ... script.ml args...". *)
+
+val split_path : string -> string list
+(** [split_path path] splits [path] according to the PATH-splitting conventions
+    of the platform. On Unix, this is exactly [String.split_on_char ':' path].
+    On Windows, entries are separated by semicolons. Sections of entries may be
+    double-quoted (which allows semicolons in filenames to be quoted). The
+    double-quote characters are stripped (i.e. [f"o"o = foo]; also
+    [split_path "foo\";\";bar" = ["foo;"; "bar"]) *)
+
+val preload_objects : string list ref
+(** List of compilation units to be loaded before entering the interactive
+    loop. *)
+
+val prepare : Format.formatter -> ?input:input -> unit -> bool
+(** Setup the load paths and initial toplevel environment and load compilation
+    units in {!preload_objects}. *)

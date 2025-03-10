@@ -1,6 +1,6 @@
 (* TEST
-   flags = " -w +A -strict-sequence "
-   * expect
+ flags = " -w +A -strict-sequence ";
+ expect;
 *)
 
 (* Ignore OCAMLRUNPARAM=b to be reproducible *)
@@ -28,7 +28,10 @@ Line 2, characters 4-29:
 2 |   | ((Val x, _) | (_, Val x)) when x < 0 -> ()
         ^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable x may match different arguments. (See manual section 11.5)
+variable x appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous_typical_example : expr * expr -> unit = <fun>
 |}]
 
@@ -95,7 +98,10 @@ Line 2, characters 4-43:
 2 |   | (`B (x, _, Some y) | `B (x, Some y, _)) when y -> ignore x
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable y may match different arguments. (See manual section 11.5)
+variable y appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous__y : [> `B of 'a * bool option * bool option ] -> unit = <fun>
 |}]
 
@@ -126,7 +132,10 @@ Line 2, characters 4-43:
 2 |   | (`B (x, _, Some y) | `B (x, Some y, _)) when x < y -> ()
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable y may match different arguments. (See manual section 11.5)
+variable y appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous__x_y : [> `B of 'a * 'a option * 'a option ] -> unit = <fun>
 |}]
 
@@ -139,7 +148,10 @@ Line 2, characters 4-43:
 2 |   | (`B (x, z, Some y) | `B (x, Some y, z)) when x < y || Some x = z -> ()
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variables y,z may match different arguments. (See manual section 11.5)
+variables y, z appear in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous__x_y_z : [> `B of 'a * 'a option * 'a option ] -> unit = <fun>
 |}]
 
@@ -170,7 +182,10 @@ Line 2, characters 4-40:
 2 |   | `A (`B (Some x, _) | `B (_, Some x)) when x -> ()
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable x may match different arguments. (See manual section 11.5)
+variable x appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous__in_depth :
   [> `A of [> `B of bool option * bool option ] ] -> unit = <fun>
 |}]
@@ -201,7 +216,10 @@ Lines 2-3, characters 4-58:
 2 | ....`A ((`B (Some x, _) | `B (_, Some x)),
 3 |         (`C (Some y, Some _, _) | `C (Some y, _, Some _))).................
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable x may match different arguments. (See manual section 11.5)
+variable x appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous__first_orpat :
   [> `A of
        [> `B of 'a option * 'a option ] *
@@ -219,7 +237,10 @@ Lines 2-3, characters 4-42:
 2 | ....`A ((`B (Some x, Some _, _) | `B (Some x, _, Some _)),
 3 |         (`C (Some y, _) | `C (_, Some y))).................
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable y may match different arguments. (See manual section 11.5)
+variable y appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous__second_orpat :
   [> `A of
        [> `B of 'a option * 'b option * 'c option ] *
@@ -312,7 +333,10 @@ Lines 2-3, characters 2-17:
 2 | ..X (Z x,Y (y,0))
 3 | | X (Z y,Y (x,_))
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variables x,y may match different arguments. (See manual section 11.5)
+variables x, y appear in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous__amoi : amoi -> int = <fun>
 |}]
 
@@ -332,7 +356,10 @@ Lines 2-3, characters 4-24:
 2 | ....(module M:S),_,(1,_)
 3 |   | _,(module M:S),(_,1)...................
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable M may match different arguments. (See manual section 11.5)
+variable M appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous__module_variable :
   (module S) * (module S) * (int * int) -> bool -> int = <fun>
 |}]
@@ -347,6 +374,7 @@ Line 2, characters 12-13:
 2 |   | (module M:S),_,(1,_)
                 ^
 Warning 60 [unused-module]: unused module M.
+
 val not_ambiguous__module_variable :
   (module S) * (module S) * (int * int) -> bool -> int = <fun>
 |}]
@@ -369,17 +397,22 @@ Line 2, characters 4-5:
         ^
 Warning 41 [ambiguous-name]: A belongs to several types: t2 t
 The first one was selected. Please disambiguate if this is wrong.
+
 Lines 1-3, characters 41-10:
 1 | .........................................function
 2 |   | A (x as z,(0 as y))|A (0 as y as z,x)|B (x,(y as z)) when g x (y+z) -> 1
 3 |   | _ -> 2
 Warning 4 [fragile-match]: this pattern-matching is fragile.
 It will remain exhaustive when constructors are added to type t2.
+
 Line 2, characters 4-56:
 2 |   | A (x as z,(0 as y))|A (0 as y as z,x)|B (x,(y as z)) when g x (y+z) -> 1
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variables x,y may match different arguments. (See manual section 11.5)
+variables x, y appear in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous_xy_but_not_ambiguous_z : (int -> int -> bool) -> t2 -> int =
   <fun>
 |}, Principal{|
@@ -388,27 +421,34 @@ Line 2, characters 4-5:
         ^
 Warning 41 [ambiguous-name]: A belongs to several types: t2 t
 The first one was selected. Please disambiguate if this is wrong.
+
 Line 2, characters 24-25:
 2 |   | A (x as z,(0 as y))|A (0 as y as z,x)|B (x,(y as z)) when g x (y+z) -> 1
                             ^
 Warning 41 [ambiguous-name]: A belongs to several types: t2 t
 The first one was selected. Please disambiguate if this is wrong.
+
 Line 2, characters 42-43:
 2 |   | A (x as z,(0 as y))|A (0 as y as z,x)|B (x,(y as z)) when g x (y+z) -> 1
                                               ^
 Warning 41 [ambiguous-name]: B belongs to several types: t2 t
 The first one was selected. Please disambiguate if this is wrong.
+
 Lines 1-3, characters 41-10:
 1 | .........................................function
 2 |   | A (x as z,(0 as y))|A (0 as y as z,x)|B (x,(y as z)) when g x (y+z) -> 1
 3 |   | _ -> 2
 Warning 4 [fragile-match]: this pattern-matching is fragile.
 It will remain exhaustive when constructors are added to type t2.
+
 Line 2, characters 4-56:
 2 |   | A (x as z,(0 as y))|A (0 as y as z,x)|B (x,(y as z)) when g x (y+z) -> 1
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variables x,y may match different arguments. (See manual section 11.5)
+variables x, y appear in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val ambiguous_xy_but_not_ambiguous_z : (int -> int -> bool) -> t2 -> int =
   <fun>
 |}]
@@ -467,7 +507,10 @@ Line 3, characters 4-29:
 3 |   | ((Val y, _) | (_, Val y)) when y < 0 -> ()
         ^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable y may match different arguments. (See manual section 11.5)
+variable y appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val guarded_ambiguity : expr * expr -> unit = <fun>
 |}]
 
@@ -496,7 +539,10 @@ Line 4, characters 4-29:
 4 |   | ((Val x, _) | (_, Val x)) when pred x -> ()
         ^^^^^^^^^^^^^^^^^^^^^^^^^
 Warning 57 [ambiguous-var-in-pattern-guard]: Ambiguous or-pattern variables under guard;
-variable x may match different arguments. (See manual section 11.5)
+variable x appears in different places in different or-pattern alternatives.
+Only the first match will be used to evaluate the guard expression.
+(see manual section 13.5.4)
+
 val cmp : (a -> bool) -> a alg -> a alg -> unit = <fun>
 |}]
 

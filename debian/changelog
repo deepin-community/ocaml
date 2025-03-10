@@ -1,3 +1,109 @@
+ocaml (5.3.0-2) unstable; urgency=medium
+
+  * Enable natdynlink on hurd-amd64 (Closes: #1094334)
+
+ -- Stéphane Glondu <glondu@debian.org>  Mon, 27 Jan 2025 13:17:46 +0100
+
+ocaml (5.3.0-1) unstable; urgency=medium
+
+  * Upload to unstable (Closes: #1092985)
+
+ -- Stéphane Glondu <glondu@debian.org>  Sun, 26 Jan 2025 17:00:54 +0100
+
+ocaml (5.3.0-1~exp2) experimental; urgency=medium
+
+  * Run tests with OCAML_TEST_SIZE=1
+  * Enable native backend on hurd-amd64 (Closes: #1086600)
+
+ -- Stéphane Glondu <glondu@debian.org>  Wed, 15 Jan 2025 10:38:28 +0100
+
+ocaml (5.3.0-1~exp1) experimental; urgency=medium
+
+  * New upstream release
+
+ -- Stéphane Glondu <glondu@debian.org>  Tue, 14 Jan 2025 08:02:31 +0100
+
+ocaml (5.2.0-3) unstable; urgency=medium
+
+  * Import upstream patch to fix coq-elpi ppc64el failure (Closes:
+    #1078549)
+
+ -- Stéphane Glondu <glondu@debian.org>  Thu, 29 Aug 2024 18:03:23 +0200
+
+ocaml (5.2.0-2) unstable; urgency=medium
+
+  * Add ocaml-base to Build-Conflicts
+
+ -- Stéphane Glondu <glondu@debian.org>  Fri, 09 Aug 2024 06:55:14 +0200
+
+ocaml (5.2.0-1) unstable; urgency=medium
+
+  * Upload to unstable (Closes: #1073289)
+  * Add bytes and bigarray compatibility packages
+  * Change OCaml stdlib dir to /usr/lib/<multiarch>/ocaml/<abi>
+
+ -- Stéphane Glondu <glondu@debian.org>  Wed, 07 Aug 2024 14:12:25 +0200
+
+ocaml (5.2.0-1~exp4) experimental; urgency=medium
+
+  * Bump version of findlib in Breaks/Replaces (Closes: #1074589)
+
+ -- Stéphane Glondu <glondu@debian.org>  Tue, 02 Jul 2024 04:58:56 +0200
+
+ocaml (5.2.0-1~exp3) experimental; urgency=medium
+
+  * Add Breaks/Replaces for lib{stdlib,compiler-libs}-ocaml-dev as well
+    (Closes: #1073995)
+  * Re-enable runtime_events on armel and mmap runtime event state in
+    RW mode there
+
+ -- Stéphane Glondu <glondu@debian.org>  Mon, 01 Jul 2024 14:37:18 +0200
+
+ocaml (5.2.0-1~exp2) experimental; urgency=medium
+
+  * Remove ppc64 from native architectures
+  * ocaml Depends on libzstd-dev
+  * libstdlib-ocaml Breaks/Replaces libfindlib-ocaml (because of META
+    files) (Closes: #1073243)
+  * Do no longer call "make bootstrap"
+  * Fix FTBFS on m68k
+  * Make runtime_events optional and disable it on armel (fixes FTBFS)
+
+ -- Stéphane Glondu <glondu@debian.org>  Thu, 20 Jun 2024 04:31:52 +0200
+
+ocaml (5.2.0-1~exp1) experimental; urgency=medium
+
+  * New upstream release (Closes: #1073289)
+
+ -- Stéphane Glondu <glondu@debian.org>  Thu, 13 Jun 2024 08:38:39 +0200
+
+ocaml (4.14.1-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Stéphane Glondu <glondu@debian.org>  Wed, 20 Sep 2023 09:59:40 +0200
+
+ocaml (4.13.1-6) unstable; urgency=medium
+
+  * Ignore test failures on hurd
+  * Remove empty override_dh_dwz
+  * Fix source build after successful build (Closes: #1049230)
+
+ -- Stéphane Glondu <glondu@debian.org>  Fri, 25 Aug 2023 20:19:07 +0200
+
+ocaml (4.13.1-5) unstable; urgency=medium
+
+  * Reorganize binary packages
+    - New packages: libstdlib-ocaml{,-dev}, libcompiler-libs-ocaml-dev
+    - Treat them as regular OCaml libraries with dh_ocaml
+    - Make ocaml-compiler-libs transitional
+    - libstdlib-ocaml breaks dh-ocaml (<< 2)
+  * Add (empty) METAS directory in stdlib dir
+  * Bump Standards-Version to 4.6.2
+  * Update lintian overrides
+
+ -- Stéphane Glondu <glondu@debian.org>  Sat, 19 Aug 2023 05:15:41 +0200
+
 ocaml (4.13.1-4) unstable; urgency=medium
 
   * Avoid build path ending up in binaries (Closes: #1030785)

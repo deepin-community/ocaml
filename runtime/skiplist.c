@@ -26,11 +26,7 @@
 #include "caml/skiplist.h"
 
 /* Size of struct skipcell, in bytes, without the forward array */
-#if (__STDC_VERSION__ >= 199901L)
 #define SIZEOF_SKIPCELL sizeof(struct skipcell)
-#else
-#define SIZEOF_SKIPCELL (sizeof(struct skipcell) - sizeof(struct skipcell *))
-#endif
 
 /* Generate a random level for a new node: 0 with probability 3/4,
    1 with probability 3/16, 2 with probability 3/64, etc.
@@ -61,8 +57,7 @@ static int random_level(void)
 
 void caml_skiplist_init(struct skiplist * sk)
 {
-  int i;
-  for (i = 0; i < NUM_LEVELS; i++) sk->forward[i] = NULL;
+  for (int i = 0; i < NUM_LEVELS; i++) sk->forward[i] = NULL;
   sk->level = 0;
 }
 
@@ -70,11 +65,10 @@ void caml_skiplist_init(struct skiplist * sk)
 
 int caml_skiplist_find(struct skiplist * sk, uintnat key, uintnat * data)
 {
-  int i;
   struct skipcell ** e, * f;
 
   e = sk->forward;
-  for (i = sk->level; i >= 0; i--) {
+  for (int i = sk->level; i >= 0; i--) {
     while (1) {
       f = e[i];
       if (f == NULL || f->key > key) break;
@@ -91,11 +85,10 @@ int caml_skiplist_find(struct skiplist * sk, uintnat key, uintnat * data)
 int caml_skiplist_find_below(struct skiplist * sk, uintnat k,
                              uintnat * key, uintnat * data)
 {
-  int i;
   struct skipcell ** e, * f, * last = NULL;
 
   e = sk->forward;
-  for (i = sk->level; i >= 0; i--) {
+  for (int i = sk->level; i >= 0; i--) {
     while (1) {
       f = e[i];
       if (f == NULL || f->key > k) break;
@@ -117,12 +110,12 @@ int caml_skiplist_insert(struct skiplist * sk,
 {
   struct skipcell ** update[NUM_LEVELS];
   struct skipcell ** e, * f;
-  int i, new_level;
+  int new_level;
 
   /* Init "cursor" to list head */
   e = sk->forward;
   /* Find place to insert new node */
-  for (i = sk->level; i >= 0; i--) {
+  for (int i = sk->level; i >= 0; i--) {
     while (1) {
       f = e[i];
       if (f == NULL || f->key >= key) break;
@@ -139,7 +132,7 @@ int caml_skiplist_insert(struct skiplist * sk,
   /* Insert additional element, updating list level if necessary */
   new_level = random_level();
   if (new_level > sk->level) {
-    for (i = sk->level + 1; i <= new_level; i++)
+    for (int i = sk->level + 1; i <= new_level; i++)
       update[i] = &sk->forward[i];
     sk->level = new_level;
   }
@@ -147,7 +140,7 @@ int caml_skiplist_insert(struct skiplist * sk,
                       (new_level + 1) * sizeof(struct skipcell *));
   f->key = key;
   f->data = data;
-  for (i = 0; i <= new_level; i++) {
+  for (int i = 0; i <= new_level; i++) {
     f->forward[i] = *update[i];
     *update[i] = f;
   }
@@ -160,12 +153,11 @@ int caml_skiplist_remove(struct skiplist * sk, uintnat key)
 {
   struct skipcell ** update[NUM_LEVELS];
   struct skipcell ** e, * f;
-  int i;
 
   /* Init "cursor" to list head */
   e = sk->forward;
   /* Find element in list */
-  for (i = sk->level; i >= 0; i--) {
+  for (int i = sk->level; i >= 0; i--) {
     while (1) {
       f = e[i];
       if (f == NULL || f->key >= key) break;
@@ -177,7 +169,7 @@ int caml_skiplist_remove(struct skiplist * sk, uintnat key)
   /* If not found, nothing to do */
   if (f == NULL || f->key != key) return 0;
   /* Rebuild list without node */
-  for (i = 0; i <= sk->level; i++) {
+  for (int i = 0; i <= sk->level; i++) {
     if (*update[i] == f)
       *update[i] = f->forward[i];
   }
@@ -194,13 +186,10 @@ int caml_skiplist_remove(struct skiplist * sk, uintnat key)
 
 void caml_skiplist_empty(struct skiplist * sk)
 {
-  struct skipcell * e, * next;
-  int i;
-
-  for (e = sk->forward[0]; e != NULL; e = next) {
+  for (struct skipcell *e = sk->forward[0], *next; e != NULL; e = next) {
     next = e->forward[0];
     caml_stat_free(e);
   }
-  for (i = 0; i <= sk->level; i++) sk->forward[i] = NULL;
+  for (int i = 0; i <= sk->level; i++) sk->forward[i] = NULL;
   sk->level = 0;
 }

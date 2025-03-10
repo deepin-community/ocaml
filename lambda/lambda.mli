@@ -54,13 +54,18 @@ type primitive =
   | Psetglobal of Ident.t
   (* Operations on heap blocks *)
   | Pmakeblock of int * mutable_flag * block_shape
-  | Pfield of int
+  | Pfield of int * immediate_or_pointer * mutable_flag
   | Pfield_computed
   | Psetfield of int * immediate_or_pointer * initialization_or_assignment
   | Psetfield_computed of immediate_or_pointer * initialization_or_assignment
   | Pfloatfield of int
   | Psetfloatfield of int * initialization_or_assignment
   | Pduprecord of Types.record_representation * int
+  (* Context switches *)
+  | Prunstack
+  | Pperform
+  | Presume
+  | Preperform
   (* External call *)
   | Pccall of Primitive.description
   (* Exceptions *)
@@ -73,7 +78,7 @@ type primitive =
   | Pandint | Porint | Pxorint
   | Plslint | Plsrint | Pasrint
   | Pintcomp of integer_comparison
-  (* Comparions that return int (not bool like above) for ordering *)
+  (* Comparisons that return int (not bool like above) for ordering *)
   | Pcompare_ints | Pcompare_floats | Pcompare_bints of boxed_integer
   | Poffsetint of int
   | Poffsetref of int
@@ -147,8 +152,19 @@ type primitive =
   | Pbbswap of boxed_integer
   (* Integer to external pointer *)
   | Pint_as_pointer
+  (* Atomic operations *)
+  | Patomic_load of {immediate_or_pointer : immediate_or_pointer}
+  | Patomic_exchange
+  | Patomic_cas
+  | Patomic_fetch_add
   (* Inhibition of optimisation *)
   | Popaque
+  (* Fetching domain-local state *)
+  | Pdls_get
+  (* Poll for runtime actions. May run pending actions such as signal
+     handlers, finalizers, memprof callbacks, etc, as well as GCs and
+     GC slices, so should not be moved or optimised away. *)
+  | Ppoll
 
 and integer_comparison =
     Ceq | Cne | Clt | Cgt | Cle | Cge
@@ -170,7 +186,7 @@ and boxed_integer = Primitive.boxed_integer =
 
 and bigarray_kind =
     Pbigarray_unknown
-  | Pbigarray_float32 | Pbigarray_float64
+  | Pbigarray_float16 | Pbigarray_float32 | Pbigarray_float64
   | Pbigarray_sint8 | Pbigarray_uint8
   | Pbigarray_sint16 | Pbigarray_uint16
   | Pbigarray_int32 | Pbigarray_int64
@@ -229,6 +245,10 @@ type local_attribute =
   | Never_local (* [@local never] *)
   | Default_local (* [@local maybe] or no [@local] attribute *)
 
+type poll_attribute =
+  | Error_poll (* [@poll error] *)
+  | Default_poll (* no [@poll] attribute *)
+
 type function_kind = Curried | Tupled
 
 type let_kind = Strict | Alias | StrictOpt
@@ -252,8 +272,15 @@ type function_attribute = {
   inline : inline_attribute;
   specialise : specialise_attribute;
   local: local_attribute;
+  poll: poll_attribute;
   is_a_functor: bool;
   stub: bool;
+  tmc_candidate: bool;
+  (* [simplif.ml] (in the `simplif` function within `simplify_lets`) attempts to
+     fuse nested functions, rewriting e.g. [fun x -> fun y -> e] to
+     [fun x y -> e]. This fusion is allowed only when the [may_fuse_arity] field
+     on *both* functions involved is [true]. *)
+  may_fuse_arity: bool;
 }
 
 type scoped_location = Debuginfo.Scoped_location.t
@@ -266,7 +293,7 @@ type lambda =
   | Lfunction of lfunction
   | Llet of let_kind * value_kind * Ident.t * lambda * lambda
   | Lmutlet of value_kind * Ident.t * lambda * lambda
-  | Lletrec of (Ident.t * lambda) list * lambda
+  | Lletrec of rec_binding list * lambda
   | Lprim of primitive * lambda list * scoped_location
   | Lswitch of lambda * lambda_switch * scoped_location
 (* switch on strings, clauses are sorted by string order,
@@ -287,7 +314,15 @@ type lambda =
   | Levent of lambda * lambda_event
   | Lifused of Ident.t * lambda
 
-and lfunction =
+and rec_binding = {
+  id : Ident.t;
+  def : lfunction;
+  (* Generic recursive bindings have been removed from Lambda in 5.2.
+     [Value_rec_compiler.compile_letrec] deals with transforming generic
+     definitions into basic Lambda code. *)
+}
+
+and lfunction = private
   { kind: function_kind;
     params: (Ident.t * value_kind) list;
     return: value_kind;
@@ -309,6 +344,7 @@ and lambda_switch =
     sw_numblocks: int;                  (* Number of tag block cases *)
     sw_blocks: (int * lambda) list;     (* Tag block cases *)
     sw_failaction : lambda option}      (* Action to take if failure *)
+
 and lambda_event =
   { lev_loc: scoped_location;
     lev_kind: lambda_event_kind;
@@ -320,7 +356,6 @@ and lambda_event_kind =
   | Lev_after of Types.type_expr
   | Lev_function
   | Lev_pseudo
-  | Lev_module_definition of Ident.t
 
 type program =
   { module_ident : Ident.t;
@@ -346,8 +381,31 @@ val make_key: lambda -> lambda option
 val const_unit: structured_constant
 val const_int : int -> structured_constant
 val lambda_unit: lambda
+
+(** [dummy_constant] produces a plecholder value with a recognizable
+    bit pattern (currently 0xBBBB in its tagged form) *)
+val dummy_constant: lambda
 val name_lambda: let_kind -> lambda -> (Ident.t -> lambda) -> lambda
 val name_lambda_list: lambda list -> (lambda list -> lambda) -> lambda
+
+val lfunction :
+  kind:function_kind ->
+  params:(Ident.t * value_kind) list ->
+  return:value_kind ->
+  body:lambda ->
+  attr:function_attribute -> (* specified with [@inline] attribute *)
+  loc:scoped_location ->
+  lambda
+
+val lfunction' :
+  kind:function_kind ->
+  params:(Ident.t * value_kind) list ->
+  return:value_kind ->
+  body:lambda ->
+  attr:function_attribute -> (* specified with [@inline] attribute *)
+  loc:scoped_location ->
+  lfunction
+
 
 val iter_head_constructor: (lambda -> unit) -> lambda -> unit
 (** [iter_head_constructor f lam] apply [f] to only the first level of
@@ -369,6 +427,10 @@ val transl_prim: string -> string -> lambda
       transl_internal_value "CamlinternalLazy" "force"
     ]}
 *)
+
+val is_evaluated : lambda -> bool
+(** [is_evaluated lam] returns [true] if [lam] is either a constant, a variable
+    or a function abstract. *)
 
 val free_variables: lambda -> Ident.Set.t
 
@@ -400,12 +462,15 @@ val rename : Ident.t Ident.Map.t -> lambda -> lambda
 (** A version of [subst] specialized for the case where we're just renaming
     idents. *)
 
-val duplicate : lambda -> lambda
+val duplicate_function : lfunction -> lfunction
 (** Duplicate a term, freshening all locally-bound identifiers. *)
 
 val map : (lambda -> lambda) -> lambda -> lambda
   (** Bottom-up rewriting, applying the function on
       each node from the leaves to the root. *)
+
+val map_lfunction : (lambda -> lambda) -> lfunction -> lfunction
+  (** Apply the given transformation on the function's body *)
 
 val shallow_map  : (lambda -> lambda) -> lambda -> lambda
   (** Rewrite each immediate sub-term with the function. *)
@@ -424,6 +489,8 @@ val default_function_attribute : function_attribute
 val default_stub_attribute : function_attribute
 
 val function_is_curried : lfunction -> bool
+val find_exact_application :
+  function_kind -> arity:int -> lambda list -> lambda list option
 
 val max_arity : unit -> int
   (** Maximal number of parameters for a function, or in other words,

@@ -35,7 +35,7 @@ let rec_items = function
 
 (** Private row types are manifested as a sequence of definitions
     preceding a recursive group, we collect them and separate them from the
-    syntatic recursive group. *)
+    syntactic recursive group. *)
 type rec_group =
   { pre_ghosts: Types.signature_item list; group:core_rec_group }
 
@@ -46,16 +46,16 @@ let next_group = function
         match src with
         | Types.Sig_class _ ->
             (* a class declaration for [c] is followed by the ghost
-               declarations of class type [c], and types [c] and [#c] *)
+               declarations of class type [c], and type [c] *)
             begin match q with
-            | ct::t::ht::q -> [ct;t;ht], q
+            | ct::t::q -> [ct;t], q
             | _ -> assert false
             end
         | Types.Sig_class_type _  ->
             (* a class type declaration for [ct] is followed by the ghost
-               declarations of types [ct] and [#ct] *)
+               declaration of type [ct] *)
            begin match q with
-            | t::ht::q -> [t;ht], q
+            | t::q -> [t], q
             | _ -> assert false
            end
         | Types.(Sig_module _ | Sig_value _ | Sig_type _ | Sig_typext _
@@ -133,7 +133,7 @@ let replace_in_place f sg =
     match current with
     | [] -> next_group f (commit ghosts) sg
     | a :: q ->
-        match f ~rec_group:q ~ghosts a.src with
+        match f ~ghosts a.src with
         | Some (info, {ghosts; replace_by}) ->
             let after = List.concat_map flatten q @ sg in
             let after = match recursive_sigitem a.src, replace_by with

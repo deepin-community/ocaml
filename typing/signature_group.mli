@@ -49,7 +49,7 @@ val rec_items: core_rec_group -> sig_item list
 
 (** Private #row types are manifested as a sequence of definitions
     preceding a recursive group, we collect them and separate them from the
-    syntatic recursive group. *)
+    syntactic recursive group. *)
 type rec_group =
   { pre_ghosts: Types.signature_item list; group:core_rec_group }
 
@@ -73,13 +73,11 @@ type in_place_patch = {
 
 (**
   [!replace_in_place patch sg] replaces the first element of the signature
-   for which [patch ~rec_group ~ghosts component] returns [Some (value,patch)].
-   The [rec_group] argument is the remaining part of the mutually
-   recursive group of [component].
+   for which [patch ~ghosts component] returns [Some (value,patch)].
    The [ghosts] list is the current prefix of ghost components associated to
    [component]
 *)
 val replace_in_place:
-  ( rec_group:sig_item list -> ghosts:Types.signature -> Types.signature_item
+  ( ghosts:Types.signature -> Types.signature_item
     -> ('a * in_place_patch) option )
   -> Types.signature -> ('a * Types.signature) option

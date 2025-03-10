@@ -97,7 +97,7 @@ let used_primitives = Hashtbl.create 7
 let add_used_primitive loc env path =
   match path with
     Some (Path.Pdot _ as path) ->
-      let path = Env.normalize_path_prefix (Some loc) env path in
+      let path = Env.normalize_value_path (Some loc) env path in
       let unit = Path.head path in
       if Ident.global unit && not (Hashtbl.mem used_primitives path)
       then Hashtbl.add used_primitives path loc
@@ -127,9 +127,10 @@ let primitives_table =
     "%loc_POS", Loc Loc_POS;
     "%loc_MODULE", Loc Loc_MODULE;
     "%loc_FUNCTION", Loc Loc_FUNCTION;
-    "%field0", Primitive ((Pfield 0), 1);
-    "%field1", Primitive ((Pfield 1), 1);
+    "%field0", Primitive (Pfield(0, Pointer, Mutable), 1);
+    "%field1", Primitive (Pfield(1, Pointer, Mutable), 1);
     "%setfield0", Primitive ((Psetfield(0, Pointer, Assignment)), 2);
+    "%setfield1", Primitive ((Psetfield(1, Pointer, Assignment)), 2);
     "%makeblock", Primitive ((Pmakeblock(0, Immutable, None)), 1);
     "%makemutable", Primitive ((Pmakeblock(0, Mutable, None)), 1);
     "%raise", Raise Raise_regular;
@@ -363,6 +364,17 @@ let primitives_table =
     "%greaterequal", Comparison(Greater_equal, Compare_generic);
     "%greaterthan", Comparison(Greater_than, Compare_generic);
     "%compare", Comparison(Compare, Compare_generic);
+    "%atomic_load",
+    Primitive ((Patomic_load {immediate_or_pointer=Pointer}), 1);
+    "%atomic_exchange", Primitive (Patomic_exchange, 2);
+    "%atomic_cas", Primitive (Patomic_cas, 3);
+    "%atomic_fetch_add", Primitive (Patomic_fetch_add, 2);
+    "%runstack", Primitive (Prunstack, 3);
+    "%reperform", Primitive (Preperform, 3);
+    "%perform", Primitive (Pperform, 1);
+    "%resume", Primitive (Presume, 4);
+    "%dls_get", Primitive (Pdls_get, 1);
+    "%poll", Primitive (Ppoll, 1);
   ]
 
 
@@ -427,6 +439,12 @@ let specialize_primitive env ty ~has_constant_constructor prim =
       | Pointer -> None
       | Immediate -> Some (Primitive (Psetfield(n, Immediate, init), arity))
     end
+  | Primitive (Pfield (n, Pointer, mut), arity), _ ->
+      (* try strength reduction based on the *result type* *)
+      let is_int = match is_function_type env ty with
+        | None -> Pointer
+        | Some (_p1, rhs) -> maybe_pointer_type env rhs in
+      Some (Primitive (Pfield (n, is_int, mut), arity))
   | Primitive (Parraylength t, arity), [p] -> begin
       let array_type = glb_array_type t (array_type_kind env p) in
       if t = array_type then None
@@ -471,6 +489,13 @@ let specialize_primitive env ty ~has_constant_constructor prim =
       let useful = List.exists (fun knd -> knd <> Pgenval) shape in
       if useful then Some (Primitive (Pmakeblock(tag, mut, Some shape), arity))
       else None
+    end
+  | Primitive (Patomic_load { immediate_or_pointer = Pointer },
+               arity), _ ->begin
+      let is_int = match is_function_type env ty with
+        | None -> Pointer
+        | Some (_p1, rhs) -> maybe_pointer_type env rhs in
+      Some (Primitive (Patomic_load {immediate_or_pointer = is_int}, arity))
     end
   | Comparison(comp, Compare_generic), p1 :: _ ->
     if (has_constant_constructor
@@ -621,7 +646,7 @@ let lambda_of_loc kind sloc =
   | Loc_FILE -> Lconst (Const_immstring file)
   | Loc_MODULE ->
     let filename = Filename.basename file in
-    let name = Env.get_unit_name () in
+    let name = Env.get_current_unit_name () in
     let module_name = if name = "" then "//"^filename^"//" else name in
     Lconst (Const_immstring module_name)
   | Loc_LOC ->
@@ -764,12 +789,12 @@ let transl_primitive loc p env ty path =
   match params with
   | [] -> body
   | _ ->
-      Lfunction{ kind = Curried;
-                 params;
-                 return = Pgenval;
-                 attr = default_stub_attribute;
-                 loc;
-                 body; }
+      lfunction ~kind:Curried
+                ~params
+                ~return:Pgenval
+                ~attr:default_stub_attribute
+                ~loc
+                ~body
 
 let lambda_primitive_needs_event_after = function
   (* We add an event after any primitive resulting in a C call that
@@ -788,7 +813,8 @@ let lambda_primitive_needs_event_after = function
   | Pbytes_load_64 _ | Pbytes_set_16 _ | Pbytes_set_32 _ | Pbytes_set_64 _
   | Pbigstring_load_16 _ | Pbigstring_load_32 _ | Pbigstring_load_64 _
   | Pbigstring_set_16 _ | Pbigstring_set_32 _ | Pbigstring_set_64 _
-  | Pbbswap _ -> true
+  | Prunstack | Pperform | Preperform | Presume
+  | Pbbswap _ | Ppoll -> true
 
   | Pbytes_to_string | Pbytes_of_string | Pignore | Psetglobal _
   | Pgetglobal _ | Pmakeblock _ | Pfield _ | Pfield_computed | Psetfield _
@@ -800,7 +826,9 @@ let lambda_primitive_needs_event_after = function
   | Pfloatcomp _ | Pstringlength | Pstringrefu | Pbyteslength | Pbytesrefu
   | Pbytessetu | Pmakearray ((Pintarray | Paddrarray | Pfloatarray), _)
   | Parraylength _ | Parrayrefu _ | Parraysetu _ | Pisint | Pisout
-  | Pintofbint _ | Pctconst _ | Pbswap16 | Pint_as_pointer | Popaque -> false
+  | Patomic_exchange | Patomic_cas | Patomic_fetch_add | Patomic_load _
+  | Pintofbint _ | Pctconst _ | Pbswap16 | Pint_as_pointer | Popaque | Pdls_get
+      -> false
 
 (* Determine if a primitive should be surrounded by an "after" debug event *)
 let primitive_needs_event_after = function
@@ -842,19 +870,23 @@ let transl_primitive_application loc p env ty path exp args arg_exps =
 
 (* Error report *)
 
-open Format
+open Format_doc
+module Style = Misc.Style
 
-let report_error ppf = function
+let report_error_doc ppf = function
   | Unknown_builtin_primitive prim_name ->
-      fprintf ppf "Unknown builtin primitive \"%s\"" prim_name
+      fprintf ppf "Unknown builtin primitive %a" Style.inline_code prim_name
   | Wrong_arity_builtin_primitive prim_name ->
-      fprintf ppf "Wrong arity for builtin primitive \"%s\"" prim_name
+      fprintf ppf "Wrong arity for builtin primitive %a"
+        Style.inline_code prim_name
 
 let () =
   Location.register_error_of_exn
     (function
       | Error (loc, err) ->
-          Some (Location.error_of_printer ~loc report_error err)
+          Some (Location.error_of_printer ~loc report_error_doc err)
       | _ ->
         None
     )
+
+let report_error = Format_doc.compat report_error_doc

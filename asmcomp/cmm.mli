@@ -135,16 +135,20 @@ type memory_chunk =
   | Word_int                           (* integer or pointer outside heap *)
   | Word_val                           (* pointer inside heap or encoded int *)
   | Single
-  | Double                             (* 64-bit-aligned 64-bit float *)
-  | Double_u                           (* word-aligned 64-bit float *)
+  | Double                             (* word-aligned 64-bit float
+                                          see PR#10433 *)
 
 and operation =
     Capply of machtype
   | Cextcall of string * machtype * exttype list * bool
       (** The [machtype] is the machine type of the result.
           The [exttype list] describes the unboxing types of the arguments.
-          An empty list means "all arguments are machine words [XInt]". *)
-  | Cload of memory_chunk * Asttypes.mutable_flag
+          An empty list means "all arguments are machine words [XInt]".
+          The boolean indicates whether the function may allocate. *)
+  | Cload of
+      { memory_chunk: memory_chunk
+      ; mutability: Asttypes.mutable_flag
+      ; is_atomic: bool }
   | Calloc
   | Cstore of memory_chunk * Lambda.initialization_or_assignment
   | Caddi | Csubi | Cmuli | Cmulhi | Cdivi | Cmodi
@@ -163,6 +167,8 @@ and operation =
                    It results in a bounds error if the index is greater than
                    or equal to the bound. *)
   | Copaque (* Sys.opaque_identity *)
+  | Cdls_get
+  | Cpoll
 
 (** Every basic block should have a corresponding [Debuginfo.t] for its
     beginning. *)
@@ -194,6 +200,7 @@ and expression =
   | Cexit of int * expression list
   | Ctrywith of expression * Backend_var.With_provenance.t * expression
       * Debuginfo.t
+  | Creturn_addr (** Return address saved in the current call frame *)
 
 type codegen_option =
   | Reduce_code_size
@@ -204,6 +211,7 @@ type fundecl =
     fun_args: (Backend_var.With_provenance.t * machtype) list;
     fun_body: expression;
     fun_codegen_options : codegen_option list;
+    fun_poll: Lambda.poll_attribute;
     fun_dbg : Debuginfo.t;
   }
 
