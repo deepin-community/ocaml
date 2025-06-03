@@ -1,0 +1,21 @@
+Description: add sunway support
+Author: Miao Changwei <miaochangwei@uniontech.com>
+
+---
+Last-Update: 2022-05-19
+
+--- ocaml-4.11.1.orig/runtime/interp.c
++++ ocaml-4.11.1/runtime/interp.c
+@@ -203,6 +203,12 @@ sp is a local copy of the global variabl
+ #define ACCU_REG asm("%x21")
+ #define JUMPTBL_BASE_REG asm("%x22")
+ #endif
++#ifdef __sw_64__
++#define PC_REG asm("$9")
++#define SP_REG asm("$10")
++#define ACCU_REG asm("$11")
++#define JUMPTBL_BASE_REG asm("$12")
++#endif
+ #endif
+ 
+ #ifdef DEBUG

@@ -1,3 +1,9 @@
+ocaml (4.13.1-4deepin1) unstable; urgency=medium
+
+  * feat: add sw64 support.
+
+ -- hudeng <hudeng@deepin.org>  Tue, 03 Jun 2025 11:03:55 +0800
+
 ocaml (4.13.1-4) unstable; urgency=medium
 
   * Avoid build path ending up in binaries (Closes: #1030785)
