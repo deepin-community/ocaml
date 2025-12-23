@@ -7,3 +7,4 @@
 0007-Put-manpages-in-section-3o-instead-of-3.patch
 0008-Filter-out-f-debug-file-prefix-map-from-ocamlc_cflag.patch
 add-sunway-support.patch
+add-loongarch64-native-support.patch
