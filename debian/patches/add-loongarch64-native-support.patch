@@ -1,0 +1,1884 @@
+Description: add loongarch64 native support
+Author: yala <zhaojunchao@loongson.cn>
+
+--- a/Makefile
++++ b/Makefile
+@@ -39,7 +39,7 @@
+ 
+ CAMLC=$(BOOT_OCAMLC) -g -nostdlib -I boot -use-prims runtime/primitives
+ CAMLOPT=$(OCAMLRUN) ./ocamlopt$(EXE) -g -nostdlib -I stdlib -I otherlibs/dynlink
+-ARCHES=amd64 i386 arm arm64 power s390x riscv
++ARCHES=amd64 i386 arm arm64 power s390x riscv loongarch64
+ INCLUDES=-I utils -I parsing -I typing -I bytecomp -I file_formats \
+         -I lambda -I middle_end -I middle_end/closure \
+         -I middle_end/flambda -I middle_end/flambda/base_types \
+--- a/asmcomp/dune
++++ b/asmcomp/dune
+@@ -22,6 +22,7 @@
+           (glob_files i386/*.ml)
+           (glob_files power/*.ml)
+           (glob_files s390x/*.ml))
++          (glob_files loongarch64/*.ml)
+  (action  (bash "cp `grep '^ARCH=' %{conf} | cut -d'=' -f2`/*.ml .")))
+ 
+ (rule
+@@ -33,7 +34,8 @@
+           arm64/emit.mlp
+           i386/emit.mlp
+           power/emit.mlp
+-          s390x/emit.mlp)
++          s390x/emit.mlp
++          loongarch64/emit.mlp)
+  (action
+    (progn
+      (with-stdout-to contains-input-name
+--- /dev/null
++++ b/asmcomp/loongarch64/CSE.ml
+@@ -0,0 +1,38 @@
++
++(**************************************************************************)
++(*                                                                        *)
++(*                                 OCaml                                  *)
++(*                                                                        *)
++(*                yala <zhaojunchao@loongson.cn>                          *)
++(*                                                                        *)
++(*               Copyright © 2008-2023 LOONGSON                           *)
++(*                                                                        *)
++(*   All rights reserved.  This file is distributed under the terms of    *)
++(*   the GNU Lesser General Public License version 2.1, with the          *)
++(*   special exception on linking described in the file LICENSE.          *)
++(*                                                                        *)
++(**************************************************************************)
++(* CSE for the loongarch *)
++
++open Arch
++open Mach
++open CSEgen
++
++class cse = object (_self)
++
++inherit cse_generic as super
++
++method! class_of_operation op =
++  match op with
++  | Ispecific(Imultaddf _ | Imultsubf _) -> Op_pure
++  | _ -> super#class_of_operation op
++
++method! is_cheap_operation op =
++  match op with
++  | Iconst_int n -> n <= 0x7FFF_FFFFn && n >= -0x8000_0000n
++  | _ -> false
++
++end
++
++let fundecl f =
++  (new cse)#fundecl f
+--- /dev/null
++++ b/asmcomp/loongarch64/NOTES.md
+@@ -0,0 +1,13 @@
++# Supported platforms
++
++LoongArch in 64-bit mode
++
++Debian architecture name: `loongarch64`
++
++# Reference documents
++
++* Instruction set specification:
++  - https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html
++
++* ELF ABI specification:
++  - https://loongson.github.io/LoongArch-Documentation/LoongArch-ELF-ABI-EN.html
+--- /dev/null
++++ b/asmcomp/loongarch64/arch.ml
+@@ -0,0 +1,91 @@
++
++(**************************************************************************)
++(*                                                                        *)
++(*                                 OCaml                                  *)
++(*                                                                        *)
++(*                yala <zhaojunchao@loongson.cn>                          *)
++(*                                                                        *)
++(*               Copyright © 2008-2023 LOONGSON                           *)
++(*                                                                        *)
++(*   All rights reserved.  This file is distributed under the terms of    *)
++(*   the GNU Lesser General Public License version 2.1, with the          *)
++(*   special exception on linking described in the file LICENSE.          *)
++(*                                                                        *)
++(**************************************************************************)
++(* Specific operations for the loongarch processor *)
++
++open Format
++
++(* Machine-specific command-line options *)
++
++let command_line_options = []
++
++(* Specific operations *)
++
++type specific_operation =
++  | Imultaddf of bool        (* multiply, optionally negate, and add *)
++  | Imultsubf of bool        (* multiply, optionally negate, and subtract *)
++
++(* Addressing modes *)
++
++type addressing_mode =
++  | Iindexed of int                     (* reg + displ *)
++
++let is_immediate n =
++  (n <= 0x7FF) && (n >= -0x800)
++
++(* Sizes, endianness *)
++
++let big_endian = false
++
++let size_addr = 8
++let size_int = size_addr
++let size_float = 8
++
++let allow_unaligned_access = false
++
++(* Behavior of division *)
++
++let division_crashes_on_overflow = false
++
++(* Operations on addressing modes *)
++
++let identity_addressing = Iindexed 0
++
++let offset_addressing addr delta =
++  match addr with
++  | Iindexed n -> Iindexed(n + delta)
++
++let num_args_addressing = function
++  | Iindexed _ -> 1
++
++(* Printing operations and addressing modes *)
++
++let print_addressing printreg addr ppf arg =
++  match addr with
++  | Iindexed n ->
++      let idx = if n <> 0 then Printf.sprintf " + %i" n else "" in
++      fprintf ppf "%a%s" printreg arg.(0) idx
++
++let print_specific_operation printreg op ppf arg =
++  match op with
++  | Imultaddf false ->
++      fprintf ppf "%a *f %a +f %a"
++        printreg arg.(0) printreg arg.(1) printreg arg.(2)
++  | Imultaddf true ->
++      fprintf ppf "-f (%a *f %a +f %a)"
++        printreg arg.(0) printreg arg.(1) printreg arg.(2)
++  | Imultsubf false ->
++      fprintf ppf "%a *f %a -f %a"
++        printreg arg.(0) printreg arg.(1) printreg arg.(2)
++  | Imultsubf true ->
++      fprintf ppf "-f (%a *f %a -f %a)"
++        printreg arg.(0) printreg arg.(1) printreg arg.(2)
++
++(* Specific operations that are pure *)
++
++let operation_is_pure _ = true
++
++(* Specific operations that can raise *)
++
++let operation_can_raise _ = false
+--- /dev/null
++++ b/asmcomp/loongarch64/emit.mlp
+@@ -0,0 +1,670 @@
++(**************************************************************************)
++(**************************************************************************)
++(*                                                                        *)
++(*                                 OCaml                                  *)
++(*                                                                        *)
++(*                yala <zhaojunchao@loongson.cn>                          *)
++(*                                                                        *)
++(*               Copyright © 2008-2023 LOONGSON                           *)
++(*                                                                        *)
++(*   All rights reserved.  This file is distributed under the terms of    *)
++(*   the GNU Lesser General Public License version 2.1, with the          *)
++(*   special exception on linking described in the file LICENSE.          *)
++(*                                                                        *)
++(**************************************************************************)
++
++(* Emission of loongarch assembly code *)
++
++open Cmm
++open Arch
++open Proc
++open Reg
++open Mach
++open Linear
++open Emitaux
++open Emitenv
++
++(* Layout of the stack.  The stack is kept 16-aligned. *)
++
++let frame_size env =
++  let size =
++    env.stack_offset +                     (* Trap frame, outgoing parameters *)
++    size_int * env.f.fun_num_stack_slots.(0) +    (* Local int variables *)
++    size_float * env.f.fun_num_stack_slots.(1) +  (* Local float variables *)
++    (if env.f.fun_contains_calls then size_addr else 0) (* Return address *)
++  in
++  Misc.align size 16
++
++let slot_offset env loc cls =
++  match loc with
++  | Local n ->
++      if cls = 0
++      then env.stack_offset + env.f.fun_num_stack_slots.(1) * size_float
++           + n * size_int
++      else env.stack_offset + n * size_float
++  | Incoming n -> frame_size env + n
++  | Outgoing n -> n
++
++(* Output a symbol *)
++
++let emit_symbol s =
++  emit_symbol '$' s
++
++let emit_jump op s =
++  if !Clflags.dlcode || !Clflags.pic_code
++  then `{emit_string op}	%plt({emit_symbol s})`
++  else `{emit_string op}	{emit_symbol s}`
++
++let emit_call = emit_jump "bl"
++let emit_tail = emit_jump "b"
++
++(* Output a label *)
++
++let emit_label lbl =
++  emit_string ".L"; emit_int lbl
++
++(* Section switching *)
++
++let data_space =
++  ".section .data"
++
++let code_space =
++  ".section .text"
++
++let rodata_space =
++  ".section .rodata"
++
++(* Names for special regs *)
++
++let reg_tmp = phys_reg 22               (* t1 *)
++let reg_t2 = phys_reg 13                (* t2 *)
++let reg_domain_state_ptr = phys_reg 25  (* s8 *)
++let reg_trap = phys_reg 23              (* s1 *)
++let reg_alloc_ptr = phys_reg 24         (* s7 *)
++
++(* Output a pseudo-register *)
++
++let reg_name = function
++  | {loc = Reg r} -> register_name r
++  | _ -> Misc.fatal_error "Emit.reg_name"
++
++let emit_reg r =
++  emit_string (reg_name r)
++
++(* Adjust sp by the given byte amount *)
++
++let emit_stack_adjustment = function
++  | 0 -> ()
++  | n when is_immediate n ->
++      `	addi.d	$sp, $sp, {emit_int n}\n`
++  | n ->
++      `	li.d	{emit_reg reg_tmp}, {emit_int n}\n`;
++      `	add.d	$sp, $sp, {emit_reg reg_tmp}\n`
++
++let emit_mem_op op src ofs =
++  if is_immediate ofs then
++    `	{emit_string op}	{emit_string src}, $sp, {emit_int ofs}\n`
++  else begin
++    `	li.d	{emit_reg reg_tmp}, {emit_int ofs}\n`;
++    `	add.d	{emit_reg reg_tmp}, $sp, {emit_reg reg_tmp}\n`;
++    `	{emit_string op}	{emit_string src}, {emit_reg reg_tmp}, 0\n`
++  end
++
++let emit_store src ofs =
++  emit_mem_op "st.d" src ofs
++
++let emit_load dst ofs =
++  emit_mem_op "ld.d" dst ofs
++
++let reload_ra n =
++  emit_load "$ra" (n - size_addr)
++
++let store_ra n =
++  emit_store "$ra" (n - size_addr)
++
++let emit_store src ofs =
++  emit_store (reg_name src) ofs
++
++let emit_load dst ofs =
++  emit_load (reg_name dst) ofs
++
++let emit_float_load dst ofs =
++  emit_mem_op "fld.d" (reg_name dst) ofs
++
++let emit_float_store src ofs =
++  emit_mem_op "fst.d" (reg_name src) ofs
++
++let emit_float_test cmp ~arg ~res =
++let negated =
++  match cmp with
++  | CFneq | CFnlt | CFngt | CFnle | CFnge -> true
++  | CFeq | CFlt | CFgt | CFle | CFge -> false
++in
++begin match cmp with
++| CFeq | CFneq -> `	fcmp.ceq.d	$fcc0, {emit_reg arg.(0)}, {emit_reg arg.(1)}\n     movcf2gr {emit_reg res}, $fcc0\n`
++| CFlt | CFnlt -> `	fcmp.clt.d	$fcc0, {emit_reg arg.(0)}, {emit_reg arg.(1)}\n     movcf2gr {emit_reg res}, $fcc0\n`
++| CFgt | CFngt -> `	fcmp.clt.d	$fcc0, {emit_reg arg.(1)}, {emit_reg arg.(0)}\n     movcf2gr {emit_reg res}, $fcc0\n`
++| CFle | CFnle -> `	fcmp.cle.d	$fcc0, {emit_reg arg.(0)}, {emit_reg arg.(1)}\n     movcf2gr {emit_reg res}, $fcc0\n`
++| CFge | CFnge -> `	fcmp.cle.d	$fcc0, {emit_reg arg.(1)}, {emit_reg arg.(0)}\n     movcf2gr {emit_reg res}, $fcc0\n`
++end;
++negated
++
++(* Record live pointers at call points *)
++
++let record_frame_label env live dbg =
++  let lbl = new_label () in
++  let live_offset = ref [] in
++  Reg.Set.iter
++    (function
++        {typ = Val; loc = Reg r} ->
++          live_offset := (r lsl 1) + 1 :: !live_offset
++      | {typ = Val; loc = Stack s} as reg ->
++          live_offset := slot_offset env s (register_class reg) :: !live_offset
++      | {typ = Addr} as r ->
++          Misc.fatal_error ("bad GC root " ^ Reg.name r)
++      | _ -> ()
++    )
++    live;
++  record_frame_descr ~label:lbl ~frame_size:(frame_size env)
++    ~live_offset:!live_offset dbg;
++  lbl
++
++let record_frame env live dbg =
++  let lbl = record_frame_label env live dbg in
++  `{emit_label lbl}:\n`
++
++let emit_call_gc gc =
++  `{emit_label gc.gc_lbl}:\n`;
++  `	{emit_call "caml_call_gc"}\n`;
++  `{emit_label gc.gc_frame_lbl}:\n`;
++  `	b	{emit_label gc.gc_return_lbl}\n`
++
++let bound_error_label env dbg =
++  if !Clflags.debug || env.bound_error_sites = [] then begin
++    let lbl_bound_error = new_label() in
++    let lbl_frame = record_frame_label env Reg.Set.empty (Dbg_other dbg) in
++    env.bound_error_sites <-
++      { bd_lbl = lbl_bound_error;
++        bd_frame = lbl_frame; } :: env.bound_error_sites;
++    lbl_bound_error
++  end else
++    let bd = List.hd env.bound_error_sites in
++    bd.bd_lbl
++
++let emit_call_bound_error bd =
++  `{emit_label bd.bd_lbl}:\n`;
++  `	{emit_call "caml_ml_array_bound_error"}\n`;
++  `{emit_label bd.bd_frame}:\n`
++
++(* Names for various instructions *)
++
++let name_for_intop = function
++  | Iadd  -> "add.d"
++  | Isub  -> "sub.d"
++  | Imul  -> "mul.d"
++  | Imulh -> "mulh.d"
++  | Idiv  -> "div.d"
++  | Iand  -> "and"
++  | Ior   -> "or"
++  | Ixor  -> "xor"
++  | Ilsl  -> "sll.d"
++  | Ilsr  -> "srl.d"
++  | Iasr  -> "sra.d"
++  | Imod  -> "mod.d"
++  | _ -> Misc.fatal_error "Emit.Intop"
++
++let name_for_intop_imm = function
++  | Iadd -> "addi.d"
++  | Iand -> "andi"
++  | Ior  -> "ori"
++  | Ixor -> "xori"
++  | Ilsl -> "slli.d"
++  | Ilsr -> "srli.d"
++  | Iasr -> "srai.d"
++  | _ -> Misc.fatal_error "Emit.Intop_imm"
++
++let name_for_floatop1 = function
++  | Inegf -> "fneg.d"
++  | Iabsf -> "fabs.d"
++  | _ -> Misc.fatal_error "Emit.Iopf1"
++
++let name_for_floatop2 = function
++  | Iaddf -> "fadd.d"
++  | Isubf -> "fsub.d"
++  | Imulf -> "fmul.d"
++  | Idivf -> "fdiv.d"
++  | _ -> Misc.fatal_error "Emit.Iopf2"
++
++let name_for_specific = function
++  | Imultaddf false -> "fmadd.d"
++  | Imultaddf true  -> "fnmadd.d"
++  | Imultsubf false -> "fmsub.d"
++  | Imultsubf true  -> "fnmsub.d"
++
++(* Output the assembly code for an instruction *)
++
++let emit_instr env i =
++  emit_debug_info i.dbg;
++  match i.desc with
++    Lend -> ()
++  | Lprologue ->
++      assert (env.f.fun_prologue_required);
++      let n = frame_size env in
++      emit_stack_adjustment (-n);
++      if env.f.fun_contains_calls then store_ra n
++  | Lop(Imove | Ispill | Ireload) ->
++      let src = i.arg.(0) and dst = i.res.(0) in
++      if src.loc <> dst.loc then begin
++        match (src, dst) with
++        | {loc = Reg _; typ = (Val | Int | Addr)}, {loc = Reg _} ->
++            `	move      {emit_reg dst}, {emit_reg src}\n`
++        | {loc = Reg _; typ = Float}, {loc = Reg _; typ = Float} ->
++            `	fmov.d   {emit_reg dst}, {emit_reg src}\n`
++        | {loc = Reg _; typ = Float}, {loc = Reg _; typ = (Val | Int | Addr)} ->
++            ` movfr2gr.d {emit_reg dst}, {emit_reg src}\n`
++        | {loc = Reg _; typ = (Val | Int | Addr)}, {loc = Stack s} ->
++            let ofs = slot_offset env s (register_class dst) in
++            emit_store src ofs
++        | {loc = Reg _; typ = Float}, {loc = Stack s} ->
++            let ofs = slot_offset env s (register_class dst) in
++            emit_float_store src ofs
++        | {loc = Stack s; typ = (Val | Int | Addr)}, {loc = Reg _} ->
++            let ofs = slot_offset env s (register_class src) in
++            emit_load dst ofs
++        | {loc = Stack s; typ = Float}, {loc = Reg _} ->
++            let ofs = slot_offset env s (register_class src) in
++            emit_float_load dst ofs
++        | {loc = Stack _}, {loc = Stack _}
++        | {loc = Unknown}, _ | _, {loc = Unknown} ->
++            Misc.fatal_error "Emit: Imove"
++      end
++  | Lop(Iconst_int n) ->
++      `	li.d	{emit_reg i.res.(0)}, {emit_nativeint n}\n`
++  | Lop(Iconst_float f) ->
++      let lbl = new_label() in
++      env.float_literals <- {fl=f; lbl} :: env.float_literals;
++      ` la.local {emit_reg reg_tmp}, {emit_label lbl} \n`;
++      `	fld.d	{emit_reg i.res.(0)}, {emit_reg reg_tmp}, 0\n`
++  | Lop(Iconst_symbol s) ->
++      ` pcaddi {emit_reg i.res.(0)}, 0 \n`;
++      ` b 7112233f\n`;
++      ` .dword {emit_symbol s}\n`;
++      ` 7112233: ld.d {emit_reg i.res.(0)}, {emit_reg i.res.(0)}, 8\n`
++  | Lop(Icall_ind) ->
++      `	jirl	$ra, {emit_reg i.arg.(0)}, 0\n`;
++      record_frame env i.live (Dbg_other i.dbg)
++  | Lop(Icall_imm {func}) ->
++      `	{emit_call func}\n`;
++      record_frame env i.live (Dbg_other i.dbg)
++  | Lop(Itailcall_ind) ->
++      let n = frame_size env in
++      if env.f.fun_contains_calls then reload_ra n;
++      emit_stack_adjustment n;
++      `	jr	{emit_reg i.arg.(0)}\n`
++  | Lop(Itailcall_imm {func}) ->
++      if func = env.f.fun_name then begin
++        `	b	{emit_label env.f.fun_tailrec_entry_point_label}\n`
++      end else begin
++        let n = frame_size env in
++        if env.f.fun_contains_calls then reload_ra n;
++        emit_stack_adjustment n;
++        `	{emit_tail func}\n`
++      end
++  | Lop(Iextcall{func; alloc = true}) ->
++      ` la.global {emit_reg reg_t2}, {emit_symbol func}\n`;
++      `	{emit_call "caml_c_call"}\n`;
++      record_frame env i.live (Dbg_other i.dbg)
++  | Lop(Iextcall{func; alloc = false}) ->
++      `	{emit_call func}\n`
++  | Lop(Istackoffset n) ->
++      assert (n mod 16 = 0);
++      emit_stack_adjustment (-n);
++      env.stack_offset <- env.stack_offset + n
++  | Lop(Iload(Single, Iindexed ofs, _mut)) ->
++      `	fld.s	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_int ofs}\n`;
++      `	fcvt.d.s	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}\n`
++  | Lop(Iload(chunk, Iindexed ofs, _mut)) ->
++      let instr =
++        match chunk with
++        | Byte_unsigned -> "ld.bu"
++        | Byte_signed -> "ld.b"
++        | Sixteen_unsigned -> "ld.hu"
++        | Sixteen_signed -> "ld.h"
++        | Thirtytwo_unsigned -> "ld.wu"
++        | Thirtytwo_signed -> "ld.w"
++        | Word_int | Word_val -> "ld.d"
++        | Single -> assert false
++        | Double | Double_u -> "fld.d"
++      in
++      `	{emit_string instr}	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_int ofs}\n`
++  | Lop(Istore(Single, Iindexed ofs, _)) ->
++      (* ft0 is marked as destroyed for this operation *)
++      `	fcvt.s.d	$ft0, {emit_reg i.arg.(0)}\n`;
++      `	fst.s	$ft0, {emit_reg i.arg.(1)}, {emit_int ofs}\n`
++  | Lop(Istore(chunk, Iindexed ofs, _)) ->
++      let instr =
++        match chunk with
++        | Byte_unsigned | Byte_signed -> "st.b"
++        | Sixteen_unsigned | Sixteen_signed -> "st.h"
++        | Thirtytwo_unsigned | Thirtytwo_signed -> "st.w"
++        | Word_int | Word_val -> "st.d"
++        | Single -> assert false
++        | Double | Double_u -> "fst.d"
++      in
++      `	{emit_string instr}	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)} ,{emit_int ofs}\n`
++  | Lop(Ialloc {bytes; dbginfo}) ->
++      let lbl_frame_lbl = record_frame_label env i.live (Dbg_alloc dbginfo) in
++      let lbl_after_alloc = new_label () in
++      let lbl_call_gc = new_label () in
++      let n = -bytes in
++      let offset = Domainstate.(idx_of_field Domain_young_limit) * 8 in
++      if is_immediate n then
++        `	addi.d	{emit_reg reg_alloc_ptr}, {emit_reg reg_alloc_ptr}, {emit_int n}\n`
++      else begin
++        `	li.d	{emit_reg reg_tmp}, {emit_int n}\n`;
++        `	add.d	{emit_reg reg_alloc_ptr}, {emit_reg reg_alloc_ptr}, {emit_reg reg_tmp}\n`
++      end;
++      `	ld.d	{emit_reg reg_tmp}, {emit_reg reg_domain_state_ptr},{emit_int offset}\n`;
++      ` sltu     {emit_reg reg_tmp}, {emit_reg reg_alloc_ptr}, {emit_reg reg_tmp}\n`;
++      ` bnez    {emit_reg reg_tmp}, {emit_label lbl_call_gc}\n`;
++      `{emit_label lbl_after_alloc}:\n`;
++      `	addi.d	{emit_reg i.res.(0)}, {emit_reg reg_alloc_ptr}, {emit_int size_addr}\n`;
++      env.call_gc_sites <-
++        { gc_lbl = lbl_call_gc;
++          gc_return_lbl = lbl_after_alloc;
++          gc_frame_lbl = lbl_frame_lbl } :: env.call_gc_sites
++  | Lop(Ipoll { return_label }) ->
++      let lbl_frame_lbl = record_frame_label env i.live (Dbg_alloc []) in
++      let lbl_after_poll = match return_label with
++                  | None -> new_label()
++                  | Some(lbl) -> lbl in
++      let lbl_call_gc = new_label () in
++      let offset = Domainstate.(idx_of_field Domain_young_limit) * 8 in
++      `	ld.d	{emit_reg reg_tmp}, {emit_reg reg_domain_state_ptr} ,{emit_int offset}\n`;
++      begin match return_label with
++      | None -> `	bltu	{emit_reg reg_alloc_ptr}, {emit_reg reg_tmp}, {emit_label lbl_call_gc}\n`;
++                `{emit_label lbl_after_poll}:\n`;
++      | Some lbl -> ` bgeu  {emit_reg reg_alloc_ptr}, {emit_reg reg_tmp}, {emit_label lbl}\n`;
++                    ` b {emit_label lbl_call_gc}\n`
++      end;
++      env.call_gc_sites <-
++        { gc_lbl = lbl_call_gc;
++          gc_return_lbl = lbl_after_poll;
++          gc_frame_lbl = lbl_frame_lbl } :: env.call_gc_sites
++  | Lop(Iintop(Icomp cmp)) ->
++      begin match cmp with
++      | Isigned Clt ->
++          `	slt	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`
++      | Isigned Cge ->
++          `	slt	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
++          `	xori	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}, 1\n`;
++      | Isigned Cgt ->
++          `	slt	{emit_reg i.res.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.arg.(0)}\n`
++      | Isigned Cle ->
++          `	slt	{emit_reg i.res.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.arg.(0)}\n`;
++          `	xori	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}, 1\n`;
++      | Isigned Ceq | Iunsigned Ceq ->
++          `	sub.d	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
++          `	sltui	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}, 1\n`
++      | Isigned Cne | Iunsigned Cne ->
++          `	sub.d	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
++          `	sltu	{emit_reg i.res.(0)}, $zero, {emit_reg i.res.(0)}\n`
++      | Iunsigned Clt ->
++          `	sltu	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`
++      | Iunsigned Cge ->
++          `	sltu	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
++          `	xori	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}, 1\n`;
++      | Iunsigned Cgt ->
++          `	sltu	{emit_reg i.res.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.arg.(0)}\n`
++      | Iunsigned Cle ->
++          `	sltu	{emit_reg i.res.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.arg.(0)}\n`;
++          `	xori	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}, 1\n`;
++      end
++  | Lop(Iintop (Icheckbound)) ->
++      let lbl = bound_error_label env i.dbg in
++      `	bleu	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_label lbl}\n`
++  | Lop(Iintop op) ->
++      let instr = name_for_intop op in
++      `	{emit_string instr}	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`
++  | Lop(Iintop_imm(Isub, n)) ->
++      `	addi.d	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_int(-n)}\n`
++  | Lop(Iintop_imm(op, n)) ->   (* FIXME *)
++      let instri = name_for_intop_imm op in
++      if n<0 then  (* FIXME *)
++          let instr = name_for_intop op in
++          ` addi.d   {emit_reg reg_tmp}, $zero, {emit_int n}\n {emit_string instr}    {emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg reg_tmp} \n`
++      else
++      `	{emit_string instri}	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_int n}\n`
++  | Lop(Inegf | Iabsf as op) ->
++      let instr = name_for_floatop1 op in
++      `	{emit_string instr}	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}\n`
++  | Lop(Iaddf | Isubf | Imulf | Idivf as op) ->
++      let instr = name_for_floatop2 op in
++      `	{emit_string instr}	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`
++  | Lop(Ifloatofint) ->
++      ` movgr2fr.d  $ft0, {emit_reg i.arg.(0)} \n`;
++      `	ffint.d.l	{emit_reg i.res.(0)}, $ft0\n`
++  | Lop(Iintoffloat) ->
++      `	ftintrz.l.d	$ft0, {emit_reg i.arg.(0)}\n`;
++      ` movfr2gr.d  {emit_reg i.res.(0)}, $ft0 \n`
++  | Lop(Iopaque) ->
++      assert (i.arg.(0).loc = i.res.(0).loc)
++  | Lop(Ispecific sop) ->
++      let instr = name_for_specific sop in
++      `	{emit_string instr}	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.arg.(2)}\n`
++  | Lreloadretaddr ->
++      let n = frame_size env in
++      reload_ra n
++  | Lreturn ->
++      let n = frame_size env in
++      emit_stack_adjustment n;
++      `	jr $ra\n`
++  | Llabel lbl ->
++      `{emit_label lbl}:\n`
++  | Lbranch lbl ->
++      `	b	{emit_label lbl}\n`
++  | Lcondbranch(tst, lbl) ->
++      begin match tst with
++      | Itruetest ->
++          `	bnez	{emit_reg i.arg.(0)}, {emit_label lbl}\n`
++      | Ifalsetest ->
++          `	beqz	{emit_reg i.arg.(0)}, {emit_label lbl}\n`
++      | Iinttest cmp ->
++          let name = match cmp with
++            | Iunsigned Ceq | Isigned Ceq -> "beq"
++            | Iunsigned Cne | Isigned Cne -> "bne"
++            | Iunsigned Cle -> "bleu" | Isigned Cle -> "ble"
++            | Iunsigned Cge -> "bgeu" | Isigned Cge -> "bge"
++            | Iunsigned Clt -> "bltu" | Isigned Clt -> "blt"
++            | Iunsigned Cgt -> "bgtu" | Isigned Cgt -> "bgt"
++          in
++          `	{emit_string name}	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_label lbl}\n`
++      | Iinttest_imm _ ->
++          Misc.fatal_error "Emit.emit_instr (Iinttest_imm _)"
++      | Ifloattest cmp ->
++          let negated = emit_float_test cmp ~arg:i.arg ~res:reg_tmp in
++          let branch =
++            if negated
++            then "beqz"
++            else "bnez"
++          in
++          `	{emit_string branch}	{emit_reg reg_tmp}, {emit_label lbl}\n`
++      | Ioddtest ->
++          `	andi	{emit_reg reg_tmp}, {emit_reg i.arg.(0)}, 1\n`;
++          `	bnez	{emit_reg reg_tmp}, {emit_label lbl}\n`
++      | Ieventest ->
++          `	andi	{emit_reg reg_tmp}, {emit_reg i.arg.(0)}, 1\n`;
++          `	beqz	{emit_reg reg_tmp}, {emit_label lbl}\n`
++      end
++  | Lcondbranch3(lbl0, lbl1, lbl2) ->
++      `	addi.d	{emit_reg reg_tmp}, {emit_reg i.arg.(0)}, -1\n`;
++      begin match lbl0 with
++      | None -> ()
++      | Some lbl -> `	bltz	{emit_reg reg_tmp}, {emit_label lbl}\n`
++      end;
++      begin match lbl1 with
++      | None -> ()
++      | Some lbl -> `	beqz	{emit_reg reg_tmp}, {emit_label lbl}\n`
++      end;
++      begin match lbl2 with
++      | None -> ()
++      | Some lbl -> `	bgtz	{emit_reg reg_tmp}, {emit_label lbl}\n`
++      end
++  | Lswitch jumptbl ->
++      (* t0 is marked as destroyed for this operation *)
++      let lbl = new_label() in
++      `	la.local	{emit_reg reg_tmp}, {emit_label lbl}\n`;
++      `	slli.d	$t0, {emit_reg i.arg.(0)}, 2\n`;
++      `	add.d	{emit_reg reg_tmp}, {emit_reg reg_tmp}, $t0\n`;
++      `	jr	{emit_reg reg_tmp}\n`;
++      `{emit_label lbl}:\n`;
++      for i = 0 to Array.length jumptbl - 1 do
++        `	b	{emit_label jumptbl.(i)}\n`
++      done
++  | Lentertrap ->
++      ()
++  | Ladjust_trap_depth { delta_traps } ->
++      (* each trap occupes 16 bytes on the stack *)
++      let delta = 16 * delta_traps in
++      env.stack_offset <- env.stack_offset + delta
++  | Lpushtrap {lbl_handler} ->
++      `	la.local	{emit_reg reg_tmp}, {emit_label lbl_handler}\n`;
++      `	addi.d	$sp, $sp, -16\n`;
++      env.stack_offset <- env.stack_offset + 16;
++      emit_store reg_tmp size_addr;
++      emit_store reg_trap 0;
++      `	move	{emit_reg reg_trap}, $sp\n`
++  | Lpoptrap ->
++      emit_load reg_trap 0;
++      `	addi.d	$sp, $sp, 16\n`;
++      env.stack_offset <- env.stack_offset - 16
++  | Lraise k ->
++      begin match k with
++      | Lambda.Raise_regular ->
++          let offset = Domainstate.(idx_of_field Domain_backtrace_pos) * 8 in
++          `	st.d $zero, {emit_reg reg_domain_state_ptr},{emit_int offset}\n`;
++          `	{emit_call "caml_raise_exn"}\n`;
++          record_frame env Reg.Set.empty (Dbg_raise i.dbg)
++      | Lambda.Raise_reraise ->
++          `	{emit_call "caml_raise_exn"}\n`;
++          record_frame env Reg.Set.empty (Dbg_raise i.dbg)
++      | Lambda.Raise_notrace ->
++          `	move	$sp, {emit_reg reg_trap}\n`;
++	  emit_load reg_tmp size_addr;
++	  emit_load reg_trap 0;
++          `	addi.d	$sp, $sp, 16\n`;
++          `	jr	{emit_reg reg_tmp}\n`
++      end
++
++(* Emit a sequence of instructions *)
++
++let rec emit_all env = function
++  | {desc = Lend} -> () | i -> emit_instr env i; emit_all env i.next
++
++(* Emission of a function declaration *)
++
++let fundecl fundecl =
++  let env = mk_env fundecl in
++  `	.globl	{emit_symbol fundecl.fun_name}\n`;
++  `	.type	{emit_symbol fundecl.fun_name}, @function\n`;
++  `	{emit_string code_space}\n`;
++  `	.align	2\n`;
++  `{emit_symbol fundecl.fun_name}:\n`;
++  emit_debug_info fundecl.fun_dbg;
++  emit_all env fundecl.fun_body;
++  List.iter emit_call_gc env.call_gc_sites;
++  List.iter emit_call_bound_error env.bound_error_sites;
++  `	.size	{emit_symbol fundecl.fun_name}, .-{emit_symbol fundecl.fun_name}\n`;
++  (* Emit the float literals *)
++  if env.float_literals <> [] then begin
++    `	{emit_string rodata_space}\n`;
++    `	.align	3\n`;
++    List.iter
++      (fun {fl; lbl} ->
++        `{emit_label lbl}:\n`;
++        emit_float64_directive ".quad" fl)
++      env.float_literals;
++  end
++
++(* Emission of data *)
++
++let declare_global_data s =
++  `	.globl	{emit_symbol s}\n`;
++  `	.type	{emit_symbol s}, @object\n`
++
++let emit_item = function
++  | Cglobal_symbol s ->
++      declare_global_data s
++  | Cdefine_symbol s ->
++      `{emit_symbol s}:\n`;
++  | Cint8 n ->
++      `	.byte	{emit_int n}\n`
++  | Cint16 n ->
++      `	.short	{emit_int n}\n`
++  | Cint32 n ->
++      `	.long	{emit_nativeint n}\n`
++  | Cint n ->
++      `	.quad	{emit_nativeint n}\n`
++  | Csingle f ->
++      emit_float32_directive ".long" (Int32.bits_of_float f)
++  | Cdouble f ->
++      emit_float64_directive ".quad" (Int64.bits_of_float f)
++  | Csymbol_address s ->
++      `	.quad	{emit_symbol s}\n`
++  | Cstring s ->
++      emit_bytes_directive "	.byte	" s
++  | Cskip n ->
++      if n > 0 then `	.space	{emit_int n}\n`
++  | Calign n ->
++      `	.align	{emit_int (Misc.log2 n)}\n`
++
++let data l =
++  `	{emit_string data_space}\n`;
++  List.iter emit_item l
++
++(* Beginning / end of an assembly file *)
++
++let begin_assembly() =
++  if !Clflags.dlcode || !Clflags.pic_code then `	\n`;
++  `	.file \"\"\n`; (* PR#7073 *)
++  reset_debug_info ();
++  (* Emit the beginning of the segments *)
++  let lbl_begin = Compilenv.make_symbol (Some "data_begin") in
++  `	{emit_string data_space}\n`;
++  declare_global_data lbl_begin;
++  `{emit_symbol lbl_begin}:\n`;
++  let lbl_begin = Compilenv.make_symbol (Some "code_begin") in
++  `	{emit_string code_space}\n`;
++  declare_global_data lbl_begin;
++  `{emit_symbol lbl_begin}:\n`
++
++let end_assembly() =
++  `	{emit_string code_space}\n`;
++  let lbl_end = Compilenv.make_symbol (Some "code_end") in
++  declare_global_data lbl_end;
++  `{emit_symbol lbl_end}:\n`;
++  `	.long	0\n`;
++  `	{emit_string data_space}\n`;
++  let lbl_end = Compilenv.make_symbol (Some "data_end") in
++  declare_global_data lbl_end;
++  `	.quad	0\n`; (* PR#6329 *)
++  `{emit_symbol lbl_end}:\n`;
++  `	.quad	0\n`;
++  (* Emit the frame descriptors *)
++  `	{emit_string rodata_space}\n`;
++  let lbl = Compilenv.make_symbol (Some "frametable") in
++  declare_global_data lbl;
++  `{emit_symbol lbl}:\n`;
++  emit_frames
++    { efa_code_label = (fun l -> `	.quad	{emit_label l}\n`);
++      efa_data_label = (fun l -> `	.quad	{emit_label l}\n`);
++      efa_8 = (fun n -> `	.byte	{emit_int n}\n`);
++      efa_16 = (fun n -> `	.short	{emit_int n}\n`);
++      efa_32 = (fun n -> `	.long	{emit_int32 n}\n`);
++      efa_word = (fun n -> `	.quad	{emit_int n}\n`);
++      efa_align = (fun n -> `	.align	{emit_int (Misc.log2 n)}\n`);
++      efa_label_rel = (fun lbl ofs ->
++                           `	.long	({emit_label lbl} - .) + {emit_int32 ofs}\n`);
++      efa_def_label = (fun l -> `{emit_label l}:\n`);
++      efa_string = (fun s -> emit_bytes_directive "	.byte	" (s ^ "\000"))
++     }
+--- /dev/null
++++ b/asmcomp/loongarch64/proc.ml
+@@ -0,0 +1,312 @@
++
++(**************************************************************************)
++(*                                                                        *)
++(*                                 OCaml                                  *)
++(*                                                                        *)
++(*                yala <zhaojunchao@loongson.cn>                          *)
++(*                                                                        *)
++(*               Copyright © 2008-2023 LOONGSON                           *)
++(*                                                                        *)
++(*   All rights reserved.  This file is distributed under the terms of    *)
++(*   the GNU Lesser General Public License version 2.1, with the          *)
++(*   special exception on linking described in the file LICENSE.          *)
++(*                                                                        *)
++(**************************************************************************)
++(* Description of the loongarch *)
++
++open Misc
++open Cmm
++open Reg
++open Arch
++open Mach
++
++(* Instruction selection *)
++
++let word_addressed = false
++
++(* Registers available for register allocation *)
++
++(* Integer register map
++   --------------------
++
++    zero                   always zero
++    ra                     return address
++    sp, gp, tp             stack pointer, global pointer, thread pointer
++    a0-a7        0-7       arguments/results
++    s2-s6        8-12      arguments/results (preserved by C)
++    t2-t8        13-19     temporary
++    s0           20        general purpose (preserved by C)
++    t0           21        temporary
++    t1           22        temporary (used by code generator)
++    s1           23        trap pointer (preserved by C)
++    s7          24        allocation pointer (preserved by C)
++    s8          25        domain pointer (preserved by C)
++
++  Floating-point register map
++  ---------------------------
++
++    ft0-ft7    100-107     temporary
++    fs0-fs1    108-109     general purpose (preserved by C)
++    fa0-fa7    110-117     arguments/results
++    fs2-fs9    118-125     arguments/results (preserved by C)
++    fs10-fs11  126-127     general purpose (preserved by C)
++    ft8-ft11   128-131     temporary
++
++  Additional notes
++  ----------------
++
++    - t1 is used by the code generator, so not available for register
++      allocation.
++
++    - t0-t6 may be used by PLT stubs, so should not be used to pass
++      arguments and may be clobbered by [Ialloc] in the presence of dynamic
++      linking.
++*)
++
++let int_reg_name =
++  [| "$a0"; "$a1"; "$a2"; "$a3"; "$a4"; "$a5"; "$a6"; "$a7";  (* 0 - 7 *)
++     "$s2"; "$s3"; "$s4"; "$s5"; "$s6";                    (* 8 - 12 *)
++     "$t2"; "$t3"; "$t4"; "$t5"; "$t6"; "$t7"; "$t8";        (* 13 - 19 *)
++     "$s0";                                            (* 20 *)
++     "$t0"; "$t1";                                      (* 21 - 22 *)
++     "$s1"; "$s7"; "$s8" |]                              (* 23 - 25 *)
++
++let float_reg_name =
++  [| "$ft0"; "$ft1"; "$ft2"; "$ft3"; "$ft4"; "$ft5"; "$ft6"; "$ft7";
++     "$fs0"; "$fs1";
++     "$fa0"; "$fa1"; "$fa2"; "$fa3"; "$fa4"; "$fa5"; "$fa6"; "$fa7";
++     "$fs2"; "$fs3"; "$fs4"; "$fs5"; "$fs6"; "$fs7";
++     "$ft8"; "$ft9"; "$ft10"; "$ft11"; "$ft12"; "$ft13"; "$ft14"; "$ft15"; |]
++
++let num_register_classes = 2
++
++let register_class r =
++  match r.typ with
++  | Val | Int | Addr -> 0
++  | Float -> 1
++
++let num_available_registers = [| 21; 32 |]
++
++let first_available_register = [| 0; 100 |]
++
++let register_name r =
++  if r < 100 then int_reg_name.(r) else float_reg_name.(r - 100)
++
++let rotate_registers = true
++
++(* Representation of hard registers by pseudo-registers *)
++
++let hard_int_reg =
++  let v = Array.make 26 Reg.dummy in
++  for i = 0 to 25 do
++    v.(i) <- Reg.at_location Int (Reg i)
++  done;
++  v
++
++let hard_float_reg =
++  let v = Array.make 32 Reg.dummy in
++  for i = 0 to 31 do
++    v.(i) <- Reg.at_location Float (Reg(100 + i))
++  done;
++  v
++
++let all_phys_regs =
++  Array.append hard_int_reg hard_float_reg
++
++let phys_reg n =
++  if n < 100 then hard_int_reg.(n) else hard_float_reg.(n - 100)
++
++let stack_slot slot ty =
++  Reg.at_location ty (Stack slot)
++
++(* Calling conventions *)
++
++let calling_conventions
++    first_int last_int first_float last_float make_stack arg =
++  let loc = Array.make (Array.length arg) Reg.dummy in
++  let int = ref first_int in
++  let float = ref first_float in
++  let ofs = ref 0 in
++  for i = 0 to Array.length arg - 1 do
++    match arg.(i) with
++    | Val | Int | Addr as ty ->
++        if !int <= last_int then begin
++          loc.(i) <- phys_reg !int;
++          incr int
++        end else begin
++          loc.(i) <- stack_slot (make_stack !ofs) ty;
++          ofs := !ofs + size_int
++        end
++    | Float ->
++        if !float <= last_float then begin
++          loc.(i) <- phys_reg !float;
++          incr float
++        end else begin
++          loc.(i) <- stack_slot (make_stack !ofs) Float;
++          ofs := !ofs + size_float
++        end
++  done;
++  (loc, Misc.align !ofs 16) (* Keep stack 16-aligned. *)
++
++let incoming ofs = Incoming ofs
++let outgoing ofs = Outgoing ofs
++let not_supported _ = fatal_error "Proc.loc_results: cannot call"
++
++let max_arguments_for_tailcalls = 13
++
++(* OCaml calling convention:
++     first integer args in a0 .. a7, s2 .. s9
++     first float args in fa0 .. fa7, fs2 .. fs9
++     remaining args on stack.
++   Return values in a0 .. a7, s2 .. s9 or fa0 .. fa7, fs2 .. fs9. *)
++
++let loc_arguments arg =
++  calling_conventions 0 12 110 121 outgoing arg
++
++let loc_parameters arg =
++  let (loc, _ofs) =
++    calling_conventions 0 12 110 121 incoming arg
++  in
++  loc
++
++let loc_results res =
++  let (loc, _ofs) =
++    calling_conventions 0 12 110 121 not_supported res
++  in
++  loc
++
++(* C calling convention:
++     first integer args in a0 .. a7
++     first float args in fa0 .. fa7
++     remaining args on stack.
++   A FP argument can be passed in an integer register if all FP registers
++   are exhausted but integer registers remain.
++   Return values in a0 .. a1 or fa0 .. fa1. *)
++
++let external_calling_conventions
++    first_int last_int first_float last_float make_stack arg =
++  let loc = Array.make (Array.length arg) [| Reg.dummy |] in
++  let int = ref first_int in
++  let float = ref first_float in
++  let ofs = ref 0 in
++  for i = 0 to Array.length arg - 1 do
++    match arg.(i) with
++    | Val | Int | Addr as ty ->
++        if !int <= last_int then begin
++          loc.(i) <- [| phys_reg !int |];
++          incr int
++        end else begin
++          loc.(i) <- [| stack_slot (make_stack !ofs) ty |];
++          ofs := !ofs + size_int
++        end
++    | Float ->
++        if !float <= last_float then begin
++          loc.(i) <- [| phys_reg !float |];
++          incr float
++        end else if !int <= last_int then begin
++          loc.(i) <- [| phys_reg !int |];
++          incr int
++        end else begin
++          loc.(i) <- [| stack_slot (make_stack !ofs) Float |];
++          ofs := !ofs + size_float
++        end
++  done;
++  (loc, Misc.align !ofs 16) (* Keep stack 16-aligned. *)
++
++let loc_external_arguments ty_args =
++  let arg = Cmm.machtype_of_exttype_list ty_args in
++  external_calling_conventions 0 7 110 117 outgoing arg
++
++let loc_external_results res =
++  let (loc, _ofs) = calling_conventions 0 1 110 111 not_supported res
++  in loc
++
++(* Exceptions are in a0 *)
++
++let loc_exn_bucket = phys_reg 0
++
++(* Volatile registers: none *)
++
++let regs_are_volatile _ = false
++
++(* Registers destroyed by operations *)
++
++let destroyed_at_c_call =
++  (* s0-s11 and fs0-fs11 are callee-save.  However s2 needs to be in this
++     list since it is clobbered by caml_c_call itself. *)
++  Array.of_list(List.map phys_reg
++    [0; 1; 2; 3; 4; 5; 6; 7; 8; 13; 14; 15; 16; 17; 18; 19;
++     100; 101; 102; 103; 104; 105; 106; 107; 110; 111; 112; 113; 114; 115; 116;
++     117; 128; 129; 130; 131])
++
++let destroyed_at_alloc =
++  (* t0-t6 are used for PLT stubs *)
++    if !Clflags.dlcode then Array.map phys_reg [|13; 14; 15; 16; 17; 18; 19; 20; 21; 22|]
++  else [| |]
++
++let destroyed_at_oper = function
++  | Iop(Icall_ind | Icall_imm _ | Iextcall{alloc = true; _}) -> all_phys_regs
++  | Iop(Iextcall{alloc = false; _}) -> destroyed_at_c_call
++  | Iop(Ialloc _) | Iop(Ipoll _) -> destroyed_at_alloc
++  | Iop(Istore(Single, _, _)) -> [| phys_reg 100 |]
++  | Iop(Ifloatofint | Iintoffloat) -> [| phys_reg 100 |]
++  | Iswitch _ -> [| phys_reg 21 |]  (* t0 *)
++  | _ -> [||]
++
++let destroyed_at_raise = all_phys_regs
++
++let destroyed_at_reloadretaddr = [| |]
++
++(* Maximal register pressure *)
++
++let safe_register_pressure = function
++  | Iextcall _ -> 5
++  | _ -> 21
++
++let max_register_pressure = function
++  | Iextcall _ -> [| 5; 8 |]
++  | _ -> [| 21; 30 |]
++
++(* Layout of the stack *)
++
++let frame_required fd =
++  fd.fun_contains_calls
++  || fd.fun_num_stack_slots.(0) > 0
++  || fd.fun_num_stack_slots.(1) > 0
++
++let prologue_required fd =
++  frame_required fd
++
++let int_dwarf_reg_numbers =
++  [| 10; 11; 12; 13; 14; 15; 16; 17;
++     18; 19; 20; 21; 22; 23; 24; 25;
++     7; 28; 29; 30; 31;
++     8;
++     5; 6;
++     9; 26; 27;
++  |]
++
++let float_dwarf_reg_numbers =
++  [| 32; 33; 34; 35; 36; 37; 38; 39;
++     40; 41;
++     42; 43; 44; 45; 46; 47; 48; 49;
++     50; 51; 52; 53; 54; 55; 56; 57;
++     58; 59;
++     60; 61; 62; 63;
++  |]
++
++let dwarf_register_numbers ~reg_class =
++  match reg_class with
++  | 0 -> int_dwarf_reg_numbers
++  | 1 -> float_dwarf_reg_numbers
++  | _ -> Misc.fatal_errorf "Bad register class %d" reg_class
++
++let stack_ptr_dwarf_register_number = 2
++
++(* Calling the assembler *)
++
++let assemble_file infile outfile =
++  Ccomp.command
++    (Config.asm ^ " -o " ^ Filename.quote outfile ^ " " ^ Filename.quote infile)
++
++let init () = ()
+--- /dev/null
++++ b/asmcomp/loongarch64/reload.ml
+@@ -0,0 +1,18 @@
++
++(**************************************************************************)
++(*                                                                        *)
++(*                                 OCaml                                  *)
++(*                                                                        *)
++(*                yala <zhaojunchao@loongson.cn>                          *)
++(*                                                                        *)
++(*               Copyright © 2008-2023 LOONGSON                           *)
++(*                                                                        *)
++(*   All rights reserved.  This file is distributed under the terms of    *)
++(*   the GNU Lesser General Public License version 2.1, with the          *)
++(*   special exception on linking described in the file LICENSE.          *)
++(*                                                                        *)
++(**************************************************************************)
++(* Reloading for the loongarch *)
++
++let fundecl f =
++  (new Reloadgen.reload_generic)#fundecl f
+--- /dev/null
++++ b/asmcomp/loongarch64/scheduling.ml
+@@ -0,0 +1,21 @@
++
++(**************************************************************************)
++(*                                                                        *)
++(*                                 OCaml                                  *)
++(*                                                                        *)
++(*                yala <zhaojunchao@loongson.cn>                          *)
++(*                                                                        *)
++(*               Copyright © 2008-2023 LOONGSON                           *)
++(*                                                                        *)
++(*   All rights reserved.  This file is distributed under the terms of    *)
++(*   the GNU Lesser General Public License version 2.1, with the          *)
++(*   special exception on linking described in the file LICENSE.          *)
++(*                                                                        *)
++(**************************************************************************)
++(* Instruction scheduling for the loongarch *)
++
++open! Schedgen (* to create a dependency *)
++
++(* Scheduling is turned off. *)
++
++let fundecl f = f
+--- /dev/null
++++ b/asmcomp/loongarch64/selection.ml
+@@ -0,0 +1,64 @@
++
++(**************************************************************************)
++(*                                                                        *)
++(*                                 OCaml                                  *)
++(*                                                                        *)
++(*                yala <zhaojunchao@loongson.cn>                          *)
++(*                                                                        *)
++(*               Copyright © 2008-2023 LOONGSON                           *)
++(*                                                                        *)
++(*   All rights reserved.  This file is distributed under the terms of    *)
++(*   the GNU Lesser General Public License version 2.1, with the          *)
++(*   special exception on linking described in the file LICENSE.          *)
++(*                                                                        *)
++(**************************************************************************)
++(* Instruction selection for the loongarch processor *)
++
++open Cmm
++open Arch
++open Mach
++
++(* Instruction selection *)
++
++class selector = object
++
++inherit Selectgen.selector_generic as super
++
++(* loongarch does not support immediate operands for comparison operators *)
++method is_immediate_test _cmp _n = false
++
++method! is_immediate op n =
++  match op with
++  | Iadd | Iand | Ior | Ixor -> is_immediate n
++  (* sub immediate is turned into add immediate opposite *)
++  | Isub -> is_immediate (-n)
++  | _ -> super#is_immediate op n
++
++method select_addressing _ = function
++  | Cop(Cadda, [arg; Cconst_int (n, _)], _) when is_immediate n ->
++      (Iindexed n, arg)
++  | Cop(Cadda, [arg1; Cop(Caddi, [arg2; Cconst_int (n, _)], _)], dbg)
++    when is_immediate n ->
++      (Iindexed n, Cop(Caddi, [arg1; arg2], dbg))
++  | arg ->
++      (Iindexed 0, arg)
++
++method! select_operation op args dbg =
++  match (op, args) with
++  (* Recognize (neg-)mult-add and (neg-)mult-sub instructions *)
++  | (Caddf, [Cop(Cmulf, [arg1; arg2], _); arg3])
++  | (Caddf, [arg3; Cop(Cmulf, [arg1; arg2], _)]) ->
++      (Ispecific (Imultaddf false), [arg1; arg2; arg3])
++  | (Csubf, [Cop(Cmulf, [arg1; arg2], _); arg3]) ->
++      (Ispecific (Imultsubf false), [arg1; arg2; arg3])
++  | (Cnegf, [Cop(Csubf, [Cop(Cmulf, [arg1; arg2], _); arg3], _)]) ->
++      (Ispecific (Imultsubf true), [arg1; arg2; arg3])
++  | (Cnegf, [Cop(Caddf, [Cop(Cmulf, [arg1; arg2], _); arg3], _)]) ->
++      (Ispecific (Imultaddf true), [arg1; arg2; arg3])
++  | _ ->
++      super#select_operation op args dbg
++
++end
++
++let fundecl ~future_funcnames f =
++  (new selector)#emit_fundecl ~future_funcnames f
+--- a/configure.ac
++++ b/configure.ac
+@@ -1023,7 +1023,8 @@
+     [earm*-*-netbsd*], [natdynlink=true],
+     [aarch64-*-linux*], [natdynlink=true],
+     [aarch64-*-freebsd*], [natdynlink=true],
+-    [riscv*-*-linux*], [natdynlink=true])])
++    [riscv*-*-linux*], [natdynlink=true],
++    [loongarch*-*-linux*], [natdynlink=true])])
+ 
+ # Try to work around the Skylake/Kaby Lake processor bug.
+ AS_CASE(["$CC,$host"],
+@@ -1128,7 +1129,9 @@
+   [x86_64-*-cygwin*],
+     [arch=amd64; system=cygwin],
+   [riscv64-*-linux*],
+-    [arch=riscv; model=riscv64; system=linux]
++    [arch=riscv; model=riscv64; system=linux],
++  [loongarch64-*-linux*],
++    [arch=loongarch64; system=linux]
+ )
+ 
+ AS_IF([test x"$enable_native_compiler" = "xno"],
+@@ -1223,7 +1226,7 @@
+ AS_CASE([$as_target,$ocaml_cv_cc_vendor],
+   [*-*-linux*,gcc-*],
+     [AS_CASE([$as_cpu],
+-      [x86_64|arm*|aarch64*|i[[3-6]]86|riscv*],
++      [x86_64|arm*|aarch64*|i[[3-6]]86|riscv*|loongarch*],
+         [default_as="${toolpref}as"])],
+   [i686-pc-windows,*],
+     [default_as="ml -nologo -coff -Cp -c -Fo"
+--- a/runtime/caml/stack.h
++++ b/runtime/caml/stack.h
+@@ -75,6 +75,11 @@
+ #define Callback_link(sp) ((struct caml_context *)((sp) + 16))
+ #endif
+ 
++#ifdef TARGET_loongarch64
++#define Saved_return_address(sp) *((intnat *)((sp) - 8))
++#define Callback_link(sp) ((struct caml_context *)((sp) + 16))
++#endif
++
+ /* Structure of OCaml callback contexts */
+ 
+ struct caml_context {
+--- /dev/null
++++ b/runtime/loongarch64.S
+@@ -0,0 +1,443 @@
++ /**************************************************************************/
++ /*                                                                        */
++ /*                                 OCaml                                  */
++ /*                                                                        */
++ /*                yala <zhaojunchao@loongson.cn>                          */
++ /*                                                                        */
++ /*               Copyright © 2008-2023 LOONGSON                           */
++ /*                                                                        */
++ /*   All rights reserved.  This file is distributed under the terms of    */
++ /*   the GNU Lesser General Public License version 2.1, with the          */
++ /*   special exception on linking described in the file LICENSE.          */
++ /*                                                                        */
++ /**************************************************************************/
++
++/* Asm part of the runtime system, loongarch64 processor, 64-bit mode */
++/* Must be preprocessed by cpp */
++
++#include "caml/m.h"
++
++#define ARG_DOMAIN_STATE_PTR $t0
++#define DOMAIN_STATE_PTR $s8
++#define TRAP_PTR $s1
++#define ALLOC_PTR $s7
++#define TMP $t1
++#define ARG $t2
++
++#define STORE st.d
++#define LOAD ld.d
++
++#undef ASM_CFI_SUPPORTED
++#if defined(ASM_CFI_SUPPORTED)
++#define CFI_STARTPROC .cfi_startproc
++#define CFI_ENDPROC .cfi_endproc
++#define CFI_ADJUST(n) .cfi_adjust_cfa_offset n
++#define CFI_REGISTER(r1,r2) .cfi_register r1,r2
++#define CFI_OFFSET(r,n) .cfi_offset r,n
++#else
++#define CFI_STARTPROC
++#define CFI_ENDPROC
++#define CFI_ADJUST(n)
++#define CFI_REGISTER(r1,r2)
++#define CFI_OFFSET(r,n)
++#endif
++
++        .set    domain_curr_field, 0
++        .set    domain_curr_cnt, 0
++#define DOMAIN_STATE(c_type, name) \
++        .equ    domain_field_caml_##name, domain_curr_field ; \
++        .set    domain_curr_cnt, domain_curr_cnt + 1;    \
++        .set    domain_curr_field, domain_curr_cnt*8
++#include "../runtime/caml/domain_state.tbl"
++#undef DOMAIN_STATE
++
++#define Caml_state(var)  DOMAIN_STATE_PTR, domain_field_caml_##var
++
++#define FUNCTION(name) \
++        .align 2; \
++        .globl name; \
++        .type name, @function; \
++name:; \
++        CFI_STARTPROC
++
++#define END_FUNCTION(name) \
++        CFI_ENDPROC; \
++        .size name, .-name
++
++#if defined(__PIC__)
++#define PLT(r) %plt(r)
++#else
++#define PLT(r) r
++#endif
++
++        .section        .text
++/* Invoke the garbage collector. */
++
++        .globl  caml_system__code_begin
++caml_system__code_begin:
++
++FUNCTION(caml_call_gc)
++.Lcaml_call_gc:
++        /* Record return address */
++        STORE   $ra, Caml_state(last_return_address)
++        /* Record lowest stack address */
++        STORE   $sp, Caml_state(bottom_of_stack)
++        /* Set up stack space, saving return address */
++        /* (1 reg for RA, 1 reg for FP, 23 allocatable int regs,
++            20 caller-save float regs) * 8 */
++        /* + 1 for alignment */
++        addi.d    $sp, $sp, -0x180
++        CFI_ADJUST(0x180)
++		STORE   $ra, $sp, 0x8
++        CFI_OFFSET(ra, -0x180+8)
++        /* Save allocatable integer registers on the stack,
++           in the order given in proc.ml */
++		STORE   $a0, $sp, 0x10
++		STORE   $a1, $sp, 0x18
++		STORE   $a2, $sp, 0x20
++		STORE   $a3, $sp, 0x28
++		STORE   $a4, $sp, 0x30
++		STORE   $a5, $sp, 0x38
++		STORE   $a6, $sp, 0x40
++		STORE   $a7, $sp, 0x48
++		STORE   $s2, $sp, 0x50
++		STORE   $s3, $sp, 0x58
++		STORE   $s4, $sp, 0x60
++		STORE   $s5, $sp, 0x68
++		STORE   $s6, $sp, 0x70
++		STORE   $t2, $sp, 0x78
++		STORE   $t3, $sp, 0x80
++		STORE   $t4, $sp, 0x88
++		STORE   $t5, $sp, 0x90
++		STORE   $t6, $sp, 0x98
++		STORE   $t7, $sp, 0xa0
++		STORE   $t8, $sp, 0xa8
++		STORE   $s0, $sp, 0xb0
++        /* Save caller-save floating-point registers on the stack
++           (callee-saves are preserved by caml_garbage_collection) */
++		fst.d     $ft0, $sp, 0xb8
++		fst.d     $ft1, $sp, 0xc0
++		fst.d     $ft2, $sp, 0xc8
++		fst.d     $ft3, $sp, 0xd0
++		fst.d     $ft4, $sp, 0xd8
++		fst.d     $ft5, $sp, 0xe0
++		fst.d     $ft6, $sp, 0xe8
++		fst.d     $ft7, $sp, 0xf0
++		fst.d     $fa0, $sp, 0xf8
++		fst.d     $fa1, $sp, 0x100
++		fst.d     $fa2, $sp, 0x108
++		fst.d     $fa3, $sp, 0x110
++		fst.d     $fa4, $sp, 0x118
++		fst.d     $fa5, $sp, 0x120
++		fst.d     $fa6, $sp, 0x128
++		fst.d     $fa7, $sp, 0x130
++		fst.d     $ft8, $sp, 0x138
++		fst.d     $ft9, $sp, 0x140
++		fst.d     $ft10, $sp, 0x148
++		fst.d     $ft11, $sp, 0x150
++		fst.d     $ft12, $sp, 0x158
++		fst.d     $ft13, $sp, 0x160
++		fst.d     $ft14, $sp, 0x168
++		fst.d     $ft15, $sp, 0x170
++        /* Store pointer to saved integer registers in caml_gc_regs */
++        addi.d    TMP, $sp, 0x10
++        STORE   TMP, Caml_state(gc_regs)
++        /* Save current allocation pointer for debugging purposes */
++        STORE   ALLOC_PTR, Caml_state(young_ptr)
++        /* Save trap pointer in case an exception is raised during GC */
++        STORE   TRAP_PTR, Caml_state(exception_pointer)
++        /* Call the garbage collector */
++        bl    PLT(caml_garbage_collection)
++        /* Restore registers */
++		LOAD   $a0, $sp, 0x10
++		LOAD   $a1, $sp, 0x18
++		LOAD   $a2, $sp, 0x20
++		LOAD   $a3, $sp, 0x28
++		LOAD   $a4, $sp, 0x30
++		LOAD   $a5, $sp, 0x38
++		LOAD   $a6, $sp, 0x40
++		LOAD   $a7, $sp, 0x48
++		LOAD   $s2, $sp, 0x50
++		LOAD   $s3, $sp, 0x58
++		LOAD   $s4, $sp, 0x60
++		LOAD   $s5, $sp, 0x68
++		LOAD   $s6, $sp, 0x70
++		LOAD   $t2, $sp, 0x78
++		LOAD   $t3, $sp, 0x80
++		LOAD   $t4, $sp, 0x88
++		LOAD   $t5, $sp, 0x90
++		LOAD   $t6, $sp, 0x98
++		LOAD   $t7, $sp, 0xa0
++		LOAD   $t8, $sp, 0xa8
++		LOAD   $s0, $sp, 0xb0
++		fld.d     $ft0, $sp, 0xb8
++		fld.d     $ft1, $sp, 0xc0
++		fld.d     $ft2, $sp, 0xc8
++		fld.d     $ft3, $sp, 0xd0
++		fld.d     $ft4, $sp, 0xd8
++		fld.d     $ft5, $sp, 0xe0
++		fld.d     $ft6, $sp, 0xe8
++		fld.d     $ft7, $sp, 0xf0
++		fld.d     $fa0, $sp, 0xf8
++		fld.d     $fa1, $sp, 0x100
++		fld.d     $fa2, $sp, 0x108
++		fld.d     $fa3, $sp, 0x110
++		fld.d     $fa4, $sp, 0x118
++		fld.d     $fa5, $sp, 0x120
++		fld.d     $fa6, $sp, 0x128
++		fld.d     $fa7, $sp, 0x130
++		fld.d     $ft8, $sp, 0x138
++		fld.d     $ft9, $sp, 0x140
++		fld.d     $ft10, $sp, 0x148
++		fld.d     $ft11, $sp, 0x150
++		fld.d     $ft12, $sp, 0x158
++		fld.d     $ft13, $sp, 0x160
++		fld.d     $ft14, $sp, 0x168
++		fld.d     $ft15, $sp, 0x170
++        /* Reload new allocation pointer */
++        LOAD    ALLOC_PTR, Caml_state(young_ptr)
++        /* Free stack space and return to caller */
++		LOAD    $ra, $sp, 0x8
++        addi.d    $sp, $sp, 0x180
++        CFI_ADJUST(-0x180)
++        jr    $ra
++END_FUNCTION(caml_call_gc)
++
++/* Call a C function from OCaml */
++/* Function to bl is in ARG */
++
++FUNCTION(caml_c_call)
++        /* Preserve return address in callee-save register s2 */
++        move      $s2, $ra
++        CFI_REGISTER(ra, s2)
++        /* Record lowest stack address and return address */
++        STORE   $ra, Caml_state(last_return_address)
++        STORE   $sp, Caml_state(bottom_of_stack)
++        /* Make the exception handler alloc ptr available to the C code */
++        STORE   ALLOC_PTR, Caml_state(young_ptr)
++        STORE   TRAP_PTR, Caml_state(exception_pointer)
++        /* Call the function */
++        jirl    $ra, ARG, 0
++        /* Reload alloc ptr */
++        LOAD    ALLOC_PTR, Caml_state(young_ptr)
++        /* Return */
++        jr      $s2
++END_FUNCTION(caml_c_call)
++
++/* Raise an exception from OCaml */
++FUNCTION(caml_raise_exn)
++        /* Test if backtrace is active */
++        LOAD    TMP, Caml_state(backtrace_active)
++        bnez    TMP, 2f
++1:      /* Cut stack at current trap handler */
++        move      $sp, TRAP_PTR
++        /* Pop previous handler and jump to it */
++        LOAD    TMP, $sp, 8
++        LOAD    TRAP_PTR, $sp, 0
++        addi.d    $sp, $sp, 16
++        CFI_ADJUST(-16)
++        jr      TMP
++2:      /* Preserve exception bucket in callee-save register s2 */
++        move      $s2, $a0
++        /* Stash the backtrace */
++        move      $a1, $ra
++        move      $a2, $sp
++        move      $a3, TRAP_PTR
++        bl    PLT(caml_stash_backtrace)
++        /* Restore exception bucket and raise */
++        move      $a0, $s2
++        b       1b
++END_FUNCTION(caml_raise_exn)
++
++        .globl  caml_reraise_exn
++        .type   caml_reraise_exn, @function
++
++/* Raise an exception from C */
++
++FUNCTION(caml_raise_exception)
++        move      DOMAIN_STATE_PTR, $a0
++        move      $a0, $a1
++        LOAD    TRAP_PTR, Caml_state(exception_pointer)
++        LOAD    ALLOC_PTR, Caml_state(young_ptr)
++        LOAD    TMP, Caml_state(backtrace_active)
++        bnez    TMP, 2f
++1:      /* Cut stack at current trap handler */
++        move      $sp, TRAP_PTR
++        LOAD    TMP, $sp, 8
++        LOAD    TRAP_PTR, $sp, 0
++        addi.d    $sp, $sp, 16
++        CFI_ADJUST(-16)
++        jr      TMP
++2:      /* Preserve exception bucket in callee-save register s2 */
++        move      $s2, $a0
++        LOAD    $a1, Caml_state(last_return_address)
++        LOAD    $a2, Caml_state(bottom_of_stack)
++        move      $a3, TRAP_PTR
++        bl    PLT(caml_stash_backtrace)
++        move      $a0, $s2
++        b       1b
++END_FUNCTION(caml_raise_exception)
++
++/* Start the OCaml program */
++
++FUNCTION(caml_start_program)
++        move      ARG_DOMAIN_STATE_PTR, $a0
++        la.global      ARG, caml_program
++        /* Code shared with caml_callback* */
++        /* Address of OCaml code to bl is in ARG */
++        /* Arguments to the OCaml code are in a0 ... a7 */
++.Ljump_to_caml:
++        /* Set up stack frame and save callee-save registers */
++        addi.d    $sp, $sp, -0xa0
++        CFI_ADJUST(0xa0)
++		STORE   $ra, $sp, 0x90
++        CFI_OFFSET(ra, -0xa0+0xb0)
++		STORE   $s0, $sp, 0x0
++		STORE   $s1, $sp, 0x8
++		STORE   $s2, $sp, 0x10
++		STORE   $s3, $sp, 0x18
++		STORE   $s4, $sp, 0x20
++		STORE   $s5, $sp, 0x28
++		STORE   $s6, $sp, 0x30
++		STORE   $s7, $sp, 0x38
++		STORE   $s8, $sp, 0x40
++		fst.d     $fs0, $sp, 0x48
++		fst.d     $fs1, $sp, 0x50
++		fst.d     $fs2, $sp, 0x58
++		fst.d     $fs3, $sp, 0x60
++		fst.d     $fs4, $sp, 0x68
++		fst.d     $fs5, $sp, 0x70
++		fst.d     $fs6, $sp, 0x78
++		fst.d     $fs7, $sp, 0x80
++        addi.d    $sp, $sp, -32
++        CFI_ADJUST(32)
++        /* Load domain state pointer from argument */
++        move      DOMAIN_STATE_PTR, ARG_DOMAIN_STATE_PTR
++        /* Setup a callback link on the stack */
++        LOAD    TMP, Caml_state(bottom_of_stack)
++        STORE   TMP, $sp, 0
++        LOAD    TMP, Caml_state(last_return_address)
++        STORE   TMP, $sp, 8
++        LOAD    TMP, Caml_state(gc_regs)
++        STORE   TMP, $sp, 16
++        /* set up a trap frame */
++        addi.d    $sp, $sp, -16
++        CFI_ADJUST(16)
++        LOAD    TMP, Caml_state(exception_pointer)
++        STORE   TMP, $sp, 0
++        la.local     TMP, .Ltrap_handler
++        STORE   TMP, $sp, 8
++        move      TRAP_PTR, $sp
++        LOAD    ALLOC_PTR, Caml_state(young_ptr)
++        STORE   $zero, Caml_state(last_return_address)
++        jirl    $ra, ARG, 0
++.Lcaml_retaddr:         /* pop trap frame, restoring caml_exception_pointer */
++        LOAD    TMP, $sp, 0
++        STORE   TMP, Caml_state(exception_pointer)
++        addi.d    $sp, $sp, 16
++        CFI_ADJUST(-16)
++.Lreturn_result:        /* pop callback link, restoring global variables */
++        LOAD    TMP, $sp, 0
++        STORE   TMP, Caml_state(bottom_of_stack)
++        LOAD    TMP, $sp, 8
++        STORE   TMP, Caml_state(last_return_address)
++        LOAD    TMP, $sp, 16
++        STORE   TMP, Caml_state(gc_regs)
++        addi.d    $sp, $sp, 32
++        CFI_ADJUST(-32)
++        /* Update allocation pointer */
++        STORE   ALLOC_PTR, Caml_state(young_ptr)
++        /* reload callee-save registers and return */
++		LOAD    $ra, $sp, 0x90
++		LOAD    $s0, $sp, 0x0
++		LOAD    $s1, $sp, 0x8
++		LOAD    $s2, $sp, 0x10
++		LOAD    $s3, $sp, 0x18
++		LOAD    $s4, $sp, 0x20
++		LOAD    $s5, $sp, 0x28
++		LOAD    $s6, $sp, 0x30
++		LOAD    $s7, $sp, 0x38
++		LOAD    $s8, $sp, 0x40
++		fld.d     $fs0, $sp, 0x48
++		fld.d     $fs1, $sp, 0x50
++		fld.d     $fs2, $sp, 0x58
++		fld.d     $fs3, $sp, 0x60
++		fld.d     $fs4, $sp, 0x68
++		fld.d     $fs5, $sp, 0x70
++		fld.d     $fs6, $sp, 0x78
++		fld.d     $fs7, $sp, 0x80
++        addi.d    $sp, $sp, 0xa0
++        CFI_ADJUST(-0xa0)
++        jr    $ra
++        .type   .Lcaml_retaddr, @function
++        .size   .Lcaml_retaddr, .-.Lcaml_retaddr
++END_FUNCTION(caml_start_program)
++
++        .align  2
++.Ltrap_handler:
++        CFI_STARTPROC
++        STORE   TRAP_PTR, Caml_state(exception_pointer)
++        ori     $a0, $a0, 2
++        b       .Lreturn_result
++        .type   .Ltrap_handler, @function
++END_FUNCTION(.Ltrap_handler)
++
++/* Callback from C to OCaml */
++
++FUNCTION(caml_callback_asm)
++        /* Initial shuffling of arguments */
++        /* a0 = Caml_state, a1 = closure, (a2) = args */
++        move      ARG_DOMAIN_STATE_PTR, $a0
++        LOAD    $a0, $a2, 0   /* a0 = first arg */
++                            /* a1 = closure environment */
++        LOAD    ARG, $a1, 0  /* code pointer */
++        b       .Ljump_to_caml
++END_FUNCTION(caml_callback_asm)
++
++FUNCTION(caml_callback2_asm)
++        /* Initial shuffling of arguments */
++        /* a0 = Caml_state, a1 = closure, (a2) = args */
++        move      ARG_DOMAIN_STATE_PTR, $a0
++        move      TMP, $a1
++        LOAD    $a0, $a2, 0
++        LOAD    $a1, $a2, 8
++        move      $a2, TMP
++        la.global      ARG, caml_apply2
++        b       .Ljump_to_caml
++END_FUNCTION(caml_callback2_asm)
++
++FUNCTION(caml_callback3_asm)
++        /* Initial shuffling of arguments */
++        /* a0 = Caml_state, a1 = closure, (a2) = args */
++        move      ARG_DOMAIN_STATE_PTR, $a0
++        move      $a3, $a1
++        LOAD    $a0, $a2, 0
++        LOAD    $a1, $a2, 8
++        LOAD    $a2, $a2, 16
++        la.global      ARG, caml_apply3
++        b       .Ljump_to_caml
++END_FUNCTION(caml_callback3_asm)
++
++FUNCTION(caml_ml_array_bound_error)
++        /* Load address of [caml_array_bound_error] in ARG */
++        la.global      ARG, caml_array_bound_error
++        /* Call that function */
++        b    caml_c_call
++END_FUNCTION(caml_ml_array_bound_error)
++
++        .globl  caml_system__code_end
++caml_system__code_end:
++
++/* GC roots for callback */
++
++        .section .data
++        .align  3
++        .globl  caml_system__frametable
++        .type   caml_system__frametable, @object
++caml_system__frametable:
++        .quad   1               /* one descriptor */
++        .quad   .Lcaml_retaddr  /* return address into callback */
++        .short  -1              /* negative frame size => use callback link */
++        .short  0               /* no roots */
++        .align  3
++        .size   caml_system__frametable, .-caml_system__frametable
+--- /dev/null
++++ b/testsuite/tools/asmgen_loongarch64.S
+@@ -0,0 +1,75 @@
++/**************************************************************************/
++/*                                                                        */
++/*                                OCaml                                   */
++/*                                                                        */
++/*                Nicolas Ojeda Bar <n.oje.bar@gmail.com>                 */
++/*                                                                        */
++/*   Copyright 2019 Institut National de Recherche en Informatique et     */
++/*     en Automatique.                                                    */
++/*                                                                        */
++/*   All rights reserved.  This file is distributed under the terms of    */
++/*   the GNU Lesser General Public License version 2.1, with the          */
++/*   special exception on linking described in the file LICENSE.          */
++/*                                                                        */
++/**************************************************************************/
++
++#define STORE st.d
++#define LOAD ld.d
++
++        .globl  call_gen_code
++        .align  2
++call_gen_code:
++    /* Set up stack frame and save callee-save registers */
++        addi.d    $sp, $sp, -208
++        STORE   $ra, $sp, 192
++        STORE   $s0, $sp, 0
++        STORE   $s1, $sp, 8
++        STORE   $s2, $sp, 16
++        STORE   $s3, $sp, 24
++        STORE   $s4, $sp, 32
++        STORE   $s5, $sp, 40
++        STORE   $s6, $sp, 48
++        STORE   $s7, $sp, 56
++        STORE   $s8, $sp, 64
++        fst.d     $fs0, $sp, 96
++        fst.d     $fs1, $sp, 104
++        fst.d     $fs2, $sp, 112
++        fst.d     $fs3, $sp, 120
++        fst.d     $fs4, $sp, 128
++        fst.d     $fs5, $sp, 136
++        fst.d     $fs6, $sp, 144
++        fst.d     $fs7, $sp, 152
++    /* Shuffle arguments */
++        move      $t0, $a0
++        move      $a0, $a1
++        move      $a1, $a2
++        move      $a2, $a3
++        move      $a3, $a4
++    /* Call generated asm */
++        jirl    $ra, $t0, 0
++    /* Reload callee-save registers and return address */
++        LOAD    $ra, $sp, 192
++        LOAD    $s0, $sp, 0
++        LOAD    $s1, $sp, 8
++        LOAD    $s2, $sp ,16
++        LOAD    $s3, $sp ,24
++        LOAD    $s4, $sp ,32
++        LOAD    $s5, $sp ,40
++        LOAD    $s6, $sp ,48
++        LOAD    $s7, $sp ,56
++        LOAD    $s8, $sp ,64
++        fld.d     $fs0, $sp, 96
++        fld.d     $fs1, $sp, 104
++        fld.d     $fs2, $sp, 112
++        fld.d     $fs3, $sp, 120
++        fld.d     $fs4, $sp, 128
++        fld.d     $fs5, $sp, 136
++        fld.d     $fs6, $sp, 144
++        fld.d     $fs7, $sp, 152
++        addi.d    $sp, $sp, 208
++        jr  $ra
++
++        .globl  caml_c_call
++        .align  2
++caml_c_call:
++        jr      $t2
+--- a/configure
++++ b/configure
+@@ -14151,6 +14151,8 @@
+     natdynlink=true ;; #(
+   riscv*-*-linux*) :
+     natdynlink=true ;; #(
++  loongarch*-*-linux*) :
++    natdynlink=true ;; #(
+   *) :
+      ;;
+ esac
+@@ -14327,6 +14329,8 @@
+     arch=amd64; system=cygwin ;; #(
+   riscv64-*-linux*) :
+     arch=riscv; model=riscv64; system=linux
++  loongarch64-*-linux*) :
++    arch=loongarch64; system=linux
+  ;; #(
+   *) :
+      ;;
+@@ -14535,7 +14539,7 @@
+ case $as_target,$ocaml_cv_cc_vendor in #(
+   *-*-linux*,gcc-*) :
+     case $as_cpu in #(
+-  x86_64|arm*|aarch64*|i[3-6]86|riscv*) :
++  x86_64|arm*|aarch64*|i[3-6]86|riscv*|loongarch*) :
+     default_as="${toolpref}as" ;; #(
+   *) :
+      ;;
