@@ -1,3 +1,10 @@
+ocaml (4.13.1-4deepin4) unstable; urgency=medium
+
+  * Fix CVE-2026-28364: buffer over-read in Marshal deserialization
+    enables remote code execution
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 20 May 2026 23:24:16 +0800
+
 ocaml (4.13.1-4deepin3) unstable; urgency=medium
 
   * Fix CVE-2026-34353: Bigarray.reshape integer overflow allows reading
